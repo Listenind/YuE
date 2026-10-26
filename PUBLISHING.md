@@ -3,7 +3,7 @@
 目标：别人在 **设置 → 插件 → 添加插件** 里输入
 
 ```
-github:Something11235/dsh-deepseek-balance#main
+github:Listenind/YuE#main
 ```
 
 就能装上这个插件。
@@ -38,7 +38,7 @@ node scripts/verify.mjs
 ```powershell
 winget install --id GitHub.cli
 gh auth login
-gh repo create Something11235/dsh-deepseek-balance --public --source . --push
+gh repo create Listenind/YuE --public --source . --push
 ```
 
 ## 2. 推上去
@@ -47,7 +47,7 @@ gh repo create Something11235/dsh-deepseek-balance --public --source . --push
 
 ```powershell
 cd "D:\Programs\DSH Desktop 插件开发\plugins\dsh-deepseek-balance"
-git remote add origin https://github.com/Something11235/dsh-deepseek-balance.git
+git remote add origin https://github.com/Listenind/YuE.git
 git push -u origin main
 git push origin --tags
 ```
@@ -58,7 +58,7 @@ git push origin --tags
 
 ```powershell
 $env:DSH_HOME = "C:\Users\JIANG\AppData\Local\Temp\dsh-clean-home"
-dsh plugin --profile desktop add github:Something11235/dsh-deepseek-balance#main
+dsh plugin --profile desktop add github:Listenind/YuE#main
 ```
 
 或者更直接：把整个 `~/.dsh/profiles/desktop/plugins/dsh-deepseek-balance` 目录临时改名，
@@ -85,7 +85,7 @@ git push && git push origin --tags
 别人升级：
 
 ```
-dsh plugin --profile desktop add github:Something11235/dsh-deepseek-balance#v1.5.1
+dsh plugin --profile desktop add github:Listenind/YuE#v1.5.1
 ```
 
 > 只写 `#main` 会跟最新提交走；写 tag 更可控。

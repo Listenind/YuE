@@ -100,7 +100,7 @@
 **从 GitHub 装（推荐，别人也用这条）：**
 
 ```bash
-dsh plugin --profile desktop add github:Something11235/dsh-deepseek-balance#main
+dsh plugin --profile desktop add github:Listenind/YuE#main
 ```
 
 装完**重启 DSH**（宿主半边不走 HMR），右侧栏就会出现「余额明细」。
