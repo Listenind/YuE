@@ -1,0 +1,51 @@
+{
+  "name": "dsh-deepseek-balance",
+  "version": "1.5.0",
+  "description": "DSH 插件：右侧栏常驻「余额明细」——DeepSeek 余额、赠送钱包，以及今日全部 token 消耗（本机 DSH + 平台所有 API Key）/ 命中 / 未命中 / 输出 / 消费金额 / API 请求次数。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "scripts",
+    "tests",
+    "cordis.patch.yml",
+    "README.md",
+    "PUBLISHING.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node tests/client.test.mjs && node tests/host.test.mjs",
+    "install:profile": "node scripts/install.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "balance",
+    "account"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  }
+}

@@ -1,0 +1,1079 @@
+/**
+ * dsh-deepseek-balance —— 宿主半边。
+ *
+ * 两件事：
+ *   ① 从 `deepseekAccount` 读出当前登录账号的钱包余额（凭证仅限 Host，渲染层拿不到 token）；
+ *   ② 从会话投影缓存聚合**今日**的 token 用量（命中 / 未命中 / 输出 / 请求次数）并折算金额。
+ *
+ * 设计取舍：
+ *   - `inject` 是空数组，apply 里用 `ctx.inject(['webServer'], ...)` 迟到接入。webServer
+ *     尚未就绪不会让插件卡在 waiting，也不会阻塞宿主启动。
+ *   - `deepseekAccount` 在**每次请求时**用 `ctx.get()` 取，而不是声明成硬依赖：账号服务
+ *     可能被关掉或换实现，那样余额退化成 `{ok:false}`，而不是让整个插件 FAILED。
+ *   - 失败一律 200 + `{ok:false, reason}`：这是"当前读不到"，不是 HTTP 传输错误。
+ *   - 用量聚合只读 `$DSH_HOME/storages/session_projcache/sessions/*.json`（DSH 自己维护的
+ *     会话投影缓存），不解析压缩日志、不依赖任何内部服务，因此不会因为 DSH 升级而炸。
+ *   - 金额是**估算**：投影只保存累计值，没有逐次请求的时间戳，所以按当前时段单价折算，
+ *     并把"高峰/空闲"和"是否完整"一起交给界面说明，绝不假装精确。
+ */
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+/** Cordis 诊断用的插件名。 */
+export const name = 'deepseek-balance'
+
+/** 没有必需服务；`webServer` 用 `ctx.inject` 迟到接入。 */
+export const inject = []
+
+/** 与 package.json 的 version 保持一致。 */
+export const VERSION = '1.5.0'
+
+/** 所有路由共享的前缀。 */
+export const ROUTE_PREFIX = '/dsh-deepseek-balance'
+
+/** 余额 + 今日用量。 */
+export const BALANCE_ROUTE = `${ROUTE_PREFIX}/balance`
+
+/** 自检：确认插件已装载、账号服务是否可见、用量目录是否可读。 */
+export const STATE_ROUTE = `${ROUTE_PREFIX}/state`
+
+/** 余额缓存窗口。 */
+const BALANCE_CACHE_TTL_MS = 15_000
+
+/** 用量缓存窗口（聚合要走一遍投影缓存，别跟着 15 秒的余额一起抖）。 */
+const USAGE_CACHE_TTL_MS = 30_000
+
+/** 单次余额查询的外部超时。 */
+const BALANCE_TIMEOUT_MS = 12_000
+
+/** 单个投影缓存文件的读取上限，防止病态文件把面板拖死。 */
+const MAX_PROJECTION_BYTES = 8 * 1024 * 1024
+
+/** 一轮聚合最多处理的文件数。 */
+const MAX_PROJECTION_FILES = 500
+
+/**
+ * 平台用量接口（platform.deepseek.com 用量页用的私有接口）。
+ * 只认 DSH 自己的鉴权头 `x-dsh-auth-token`；`Authorization: Bearer` 会被 40003 拒。
+ * 返回按 API Key × 模型 × 天分桶的 token / 成本，能覆盖所有客户端（含 CC Switch）。
+ */
+const PLATFORM_USAGE_AMOUNT = '/api/v0/usage/by_api_key/amount'
+const PLATFORM_USAGE_COST = '/api/v0/usage/by_api_key/cost'
+
+/** 平台用量查询的外部超时。 */
+const PLATFORM_USAGE_TIMEOUT_MS = 12_000
+
+/** 趋势窗口天数（与客户端一致）。 */
+export const TREND_DAYS = 7
+
+/**
+ * DeepSeek 官方价目（人民币 / 百万 tokens）。
+ * 来源：https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+ * 每项是 `[空闲时段, 高峰时段]`；高峰 = 北京时间周一至周五 9:00-12:00 与 14:00-18:00
+ * （不含法定节假日，这里不判断节假日，只按周内时段近似）。
+ */
+export const PRICE_TABLE = {
+  'deepseek-flash': {
+    hit: [0.02, 0.04],
+    miss: [1, 2],
+    out: [4, 8],
+  },
+  'deepseek-v4-pro': {
+    hit: [0.15, 0.3],
+    miss: [4.5, 9],
+    out: [13.5, 27],
+  },
+}
+
+/** 未知模型按 flash 计价。 */
+const DEFAULT_PRICE_KEY = 'deepseek-flash'
+
+/** DSH 主目录。 */
+const DSH_HOME = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+
+/** 会话投影缓存目录。 */
+const PROJECTION_DIR = path.join(DSH_HOME, 'storages', 'session_projcache', 'sessions')
+
+/** 跨天会话的每日基线，落在插件自己的目录里。 */
+const LEDGER_FILE = path.join(DSH_HOME, 'dsh-deepseek-balance', 'usage-baselines.json')
+
+/** 首次采样晚于零点多久就算"今天不完整"。 */
+const EXACT_WINDOW_MS = 10 * 60 * 1000
+
+/**
+ * 取一个安全的错误描述。
+ * @param {unknown} error 任意抛出的值。
+ * @returns {string} 一行文本。
+ */
+function describe(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 把一个可能不是数字的值收敛成有限非负数。
+ * @param {unknown} value 原值。
+ * @returns {number} 可参与运算的数字。
+ */
+function count(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? number : 0
+}
+
+/**
+ * 本地零点时间戳。
+ * @param {number} now 当前毫秒时间戳。
+ * @returns {number} 今天 00:00:00.000。
+ */
+function startOfDay(now) {
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  return start.getTime()
+}
+
+/**
+ * 本地日期键 `YYYY-MM-DD`。
+ * @param {number} ms 毫秒时间戳。
+ * @returns {string} 日期键。
+ */
+function dayKey(ms) {
+  const date = new Date(ms)
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+/**
+ * 当前是否处于 DeepSeek 的高峰时段（北京时间周内 9-12、14-18）。
+ * @param {number} ms 毫秒时间戳。
+ * @returns {boolean} 高峰为 true。
+ */
+export function isPeakHour(ms) {
+  const beijing = new Date(ms + 8 * 3600_000)
+  const weekday = beijing.getUTCDay()
+  if (weekday === 0 || weekday === 6) return false
+  const hour = beijing.getUTCHours() + beijing.getUTCMinutes() / 60
+  return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18)
+}
+
+/**
+ * 取模型对应的价目行。
+ * @param {string | undefined} model 模型名。
+ * @returns {{ hit: number[], miss: number[], out: number[] }} 价目。
+ */
+function priceOf(model) {
+  return PRICE_TABLE[model] ?? PRICE_TABLE[DEFAULT_PRICE_KEY]
+}
+
+/**
+ * 把一组 token 折算成金额。
+ * @param {{ cacheRead: number, uncached: number, output: number }} tokens 三类 token。
+ * @param {{ hit: number[], miss: number[], out: number[] }} price 价目。
+ * @param {number} band 0 = 空闲，1 = 高峰。
+ * @returns {number} 人民币金额。
+ */
+function costOf(tokens, price, band) {
+  return (
+    (tokens.cacheRead / 1_000_000) * price.hit[band] +
+    (tokens.uncached / 1_000_000) * price.miss[band] +
+    (tokens.output / 1_000_000) * price.out[band]
+  )
+}
+
+/**
+ * 读当天的基线账本。
+ * @param {string} day 日期键。
+ * @returns {{ day: string, sessions: Record<string, Record<string, number>> }} 账本。
+ */
+function readLedger(day) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8'))
+    if (raw?.day === day && raw.sessions !== undefined && typeof raw.sessions === 'object') return raw
+  } catch {
+    /* 没有账本 / 账本损坏都从空开始 */
+  }
+  return { day, sessions: {} }
+}
+
+/**
+ * 写回基线账本；写不进去不算错误，只是跨天会话会退化成"不计入"。
+ * @param {{ day: string, sessions: Record<string, unknown> }} ledger 账本。
+ * @returns {boolean} 是否写成功。
+ */
+function writeLedger(ledger) {
+  try {
+    fs.mkdirSync(path.dirname(LEDGER_FILE), { recursive: true })
+    fs.writeFileSync(LEDGER_FILE, `${JSON.stringify(ledger)}\n`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 从一个投影缓存记录里取出需要的那几个叶子值。
+ * @param {Record<string, any>} record 投影缓存的 `record`。
+ * @returns {{ tokens: { cacheRead: number, uncached: number, output: number, requests: number }, createdAt: number | undefined, model: string | undefined } | undefined}}
+ */
+function readRecord(record) {
+  const totals = record?.rows?.tokenUsage?.val?.totals
+  if (totals === undefined || typeof totals !== 'object') return undefined
+  const steps = record?.rows?.sessionStats?.val?.steps
+  const model = record?.rows?.modelSelection?.val?.lastUsed?.model
+  return {
+    tokens: {
+      cacheRead: count(totals.cacheReadTokens),
+      uncached: count(totals.uncachedInputTokens),
+      output: count(totals.outputTokens),
+      requests: count(steps),
+    },
+    createdAt: typeof record?.identity?.createdAt === 'number' ? record.identity.createdAt : undefined,
+    model: typeof model === 'string' ? model : undefined,
+  }
+}
+
+/**
+ * 聚合今天所有会话的用量。
+ *
+ * 口径（写进 README，也写在面板的提示里）：
+ *   - 今天创建的会话：全部累计值都算今天，精确；
+ *   - 跨天会话：用账本里"今天第一次看到它"的累计值做基线，取差值；
+ *     如果那次采样晚于零点 10 分钟，就把这一天的结果标成"不完整"。
+ *
+ * @param {number} now 当前毫秒时间戳。
+ * @returns {Record<string, unknown>} 面板要的纯 JSON 用量块。
+ */
+export function aggregateUsage(now = Date.now()) {
+  const start = startOfDay(now)
+  const day = dayKey(now)
+  const peak = isPeakHour(now)
+  const band = peak ? 1 : 0
+
+  const ledger = readLedger(day)
+  let ledgerDirty = false
+  let ledgerWritable = true
+
+  const sum = { cacheRead: 0, uncached: 0, output: 0, requests: 0 }
+  const state = { sessions: 0, skipped: 0, partial: false, cost: 0 }
+
+  let names = []
+  try {
+    names = fs.readdirSync(PROJECTION_DIR)
+  } catch (error) {
+    return {
+      day,
+      available: false,
+      reason: 'no-projection-dir',
+      message: describe(error),
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      requests: 0,
+      sessions: 0,
+      cost: 0,
+      currency: 'CNY',
+      peak,
+      partial: true,
+    }
+  }
+
+  const seen = new Set()
+  for (const entry of names) {
+    if (!entry.endsWith('.json')) continue
+    if (state.sessions + state.skipped >= MAX_PROJECTION_FILES) break
+
+    const file = path.join(PROJECTION_DIR, entry)
+    let stat
+    try {
+      stat = fs.statSync(file)
+    } catch {
+      continue
+    }
+    // 今天没被写过的会话，今天就没有活动，直接跳过——这是最省事的一层过滤。
+    if (stat.mtimeMs < start) continue
+    if (stat.size > MAX_PROJECTION_BYTES) {
+      state.skipped += 1
+      continue
+    }
+
+    let record
+    try {
+      record = JSON.parse(fs.readFileSync(file, 'utf8'))?.record
+    } catch {
+      state.skipped += 1
+      continue
+    }
+
+    const parsed = readRecord(record)
+    if (parsed === undefined) continue
+
+    const id = entry.replace(/\.json$/, '')
+    seen.add(id)
+    const price = priceOf(parsed.model)
+    const createdToday = parsed.createdAt !== undefined && parsed.createdAt >= start
+
+    /** @type {{ cacheRead: number, uncached: number, output: number, requests: number }} */
+    let delta = parsed.tokens
+
+    if (!createdToday) {
+      const known = ledger.sessions[id]
+      if (known === undefined) {
+        // 今天第一次看到这个跨天会话：就地立基线。基线取得越早，今天的结果越完整。
+        const exact = now - start <= EXACT_WINDOW_MS
+        ledger.sessions[id] = { ...parsed.tokens, exact }
+        ledgerDirty = ledgerWritable
+        if (!exact) state.partial = true
+        state.sessions += 1
+        continue
+      }
+      if (known.exact !== true) state.partial = true
+      delta = {
+        cacheRead: Math.max(0, parsed.tokens.cacheRead - count(known.cacheRead)),
+        uncached: Math.max(0, parsed.tokens.uncached - count(known.uncached)),
+        output: Math.max(0, parsed.tokens.output - count(known.output)),
+        requests: Math.max(0, parsed.tokens.requests - count(known.requests)),
+      }
+    }
+
+    sum.cacheRead += delta.cacheRead
+    sum.uncached += delta.uncached
+    sum.output += delta.output
+    sum.requests += delta.requests
+    state.cost += costOf(delta, price, band)
+    state.sessions += 1
+  }
+
+  // 清理账本里已经消失的会话（被删档），避免文件无限增长。
+  for (const id of Object.keys(ledger.sessions)) {
+    if (seen.has(id)) continue
+    delete ledger.sessions[id]
+    ledgerDirty = ledgerWritable
+  }
+
+  if (ledgerDirty) ledgerWritable = writeLedger(ledger)
+
+  return {
+    day,
+    available: true,
+    totalTokens: sum.cacheRead + sum.uncached + sum.output,
+    cacheReadTokens: sum.cacheRead,
+    uncachedInputTokens: sum.uncached,
+    outputTokens: sum.output,
+    requests: sum.requests,
+    sessions: state.sessions,
+    skipped: state.skipped,
+    cost: Math.round(state.cost * 10000) / 10000,
+    currency: 'CNY',
+    peak,
+    partial: state.partial,
+    ledger: ledgerWritable ? 'ok' : 'read-only',
+  }
+}
+
+/** 余额缓存：`{ at, value }`。 */
+let balanceCache
+
+/** 正在进行的余额查询。 */
+let balanceInflight
+
+/** 用量缓存：`{ at, value }`。 */
+let usageCache
+
+/* ------------------------------------------------------------------ 平台用量 -- */
+/*
+ * 本地投影缓存只看得见「这台 DSH 自己跑的会话」，而且 DSH 主力走的是 OAuth，
+ * 根本不出现在 API Key 的用量里。所以面板要算“全部 token”，必须再叠加平台侧：
+ * `/api/v0/usage/by_api_key/*` 覆盖这个账号下所有 API Key（含 CC Switch 之类
+ * 用同一账号的其它客户端），按 天 × Key × 模型 分桶。
+ *
+ * 两个口径互相独立：
+ *   - 本机 DSH 会话（投影缓存，OAuth 流量）；
+ *   - 平台 API Key（全部 Key）。
+ * 唯一可能重复的是「DSH 自己也在用某个 API Key」的那部分，用凭据里的
+ * DEEPSEEK_API_KEY 按掩码匹配出来单独减掉。
+ */
+
+/**
+ * 平台数值可能是数字、字符串或 `{ value }`，统一收敛成非负数。
+ * @param {unknown} value 原始值。
+ * @returns {number} 数值。
+ */
+function platformNumber(value) {
+  const raw = value !== null && typeof value === 'object' ? value.value : value
+  const number = Number(raw)
+  return Number.isFinite(number) && number > 0 ? number : 0
+}
+
+/**
+ * 以「东为正的秒偏移」把时间戳换算成当地日期键。
+ * @param {number} ms 毫秒时间戳。
+ * @param {number} tzSeconds 东为正的秒偏移。
+ * @returns {string} `YYYY-MM-DD`。
+ */
+function localDayKey(ms, tzSeconds) {
+  return new Date(ms + tzSeconds * 1000).toISOString().slice(0, 10)
+}
+
+/**
+ * 近 N 天窗口（按当地零点对齐），返回秒级 start/end。
+ * @param {number} now 当前毫秒时间戳。
+ * @param {number} tzSeconds 东为正的秒偏移。
+ * @param {number} days 天数。
+ * @returns {{ start: number, end: number }} 秒级窗口。
+ */
+function usageWindow(now, tzSeconds, days = TREND_DAYS) {
+  const offsetMs = tzSeconds * 1000
+  const localMidnight = Math.floor((now + offsetMs) / 86_400_000) * 86_400_000 - offsetMs
+  return {
+    start: Math.floor((localMidnight - (days - 1) * 86_400_000) / 1000),
+    end: Math.floor((localMidnight + 86_400_000) / 1000),
+  }
+}
+
+/**
+ * 读 DSH 自己配置的 API Key（只用来把它从「其它客户端」里剔除，绝不外传）。
+ * @returns {string | undefined} 明文 Key。
+ */
+function readOwnApiKey() {
+  try {
+    const text = fs.readFileSync(path.join(DSH_HOME, '.credentials.yaml'), 'utf8')
+    const match = /^\s*DEEPSEEK_API_KEY:\s*(.+)$/m.exec(text)
+    if (match === null) return undefined
+    return match[1].trim().replace(/^["']|["']$/g, '')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 平台的 `api_key` 字段里 Key 是打码的（`sk-2b18b…22f6`），按首尾比对就能认出自己那把。
+ * @param {unknown} apiKey 平台返回的 api_key（对象或字符串）。
+ * @param {string | undefined} ownKey 本地存的明文 Key。
+ * @returns {boolean} 是否是 DSH 自己用的那把。
+ */
+function isOwnKey(apiKey, ownKey) {
+  if (ownKey === undefined || ownKey.length < 12) return false
+  const masked = typeof apiKey === 'string' ? apiKey : apiKey?.sensitive_id
+  if (typeof masked !== 'string' || masked.length < 12) return false
+  return masked.startsWith(ownKey.slice(0, 8)) && masked.endsWith(ownKey.slice(-4))
+}
+
+/**
+ * 请求平台接口并返回 `biz_data`。
+ * @param {string} url 完整地址。
+ * @param {Record<string, string>} headers 请求头。
+ * @param {number} timeoutMs 超时。
+ * @returns {Promise<any>} `data.biz_data`。
+ */
+async function platformJson(url, headers, timeoutMs) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, { headers, redirect: 'error', signal: controller.signal })
+    const text = await response.text()
+    let payload
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      throw new Error(`平台返回非 JSON（HTTP ${response.status}）`)
+    }
+    const code = Number(payload?.code ?? 0)
+    if (code === 40002 || code === 40003) {
+      const error = new Error('平台登录态无效')
+      error.code = 'signed-out'
+      throw error
+    }
+    if (code !== 0) throw new Error(`平台接口 code=${code}`)
+    const bizCode = Number(payload?.data?.biz_code ?? 0)
+    if (bizCode !== 0) throw new Error(`平台接口 biz_code=${bizCode}`)
+    return payload?.data?.biz_data
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 把平台的两份响应折成「按天 + 按 Key」的用量。
+ * @param {any} amount amount 接口的 `biz_data`（`{ series }`）。
+ * @param {any} cost cost 接口的 `biz_data`（`{ data: [{ currency, series }] }`）。
+ * @param {{ now: number, tzSeconds: number, ownKey: string | undefined }} options 口径参数。
+ * @returns {Record<string, unknown>} 平台用量块。
+ */
+function summarizePlatform(amount, cost, options) {
+  const { tzSeconds, ownKey } = options
+  const days = new Map()
+  const keys = new Map()
+
+  /** 取（或建）某一天的累计。 */
+  const dayOf = (date) => {
+    let entry = days.get(date)
+    if (entry === undefined) {
+      entry = {
+        date,
+        tokens: 0,
+        cost: 0,
+        requests: 0,
+        hit: 0,
+        miss: 0,
+        output: 0,
+        ownTokens: 0,
+        ownRequests: 0,
+        ownCost: 0,
+        ownHit: 0,
+        ownMiss: 0,
+        ownOutput: 0,
+      }
+      days.set(date, entry)
+    }
+    return entry
+  }
+
+  /** 取（或建）某个 Key 的累计。 */
+  const keyOf = (series) => {
+    const apiKey = series?.api_key
+    const name = typeof apiKey === 'string' ? apiKey : apiKey?.name ?? 'unknown'
+    const id = apiKey !== null && typeof apiKey === 'object' ? apiKey.tracking_id ?? apiKey.sensitive_id ?? name : name
+    const own = isOwnKey(apiKey, ownKey)
+    let entry = keys.get(id)
+    if (entry === undefined) {
+      entry = { name, own, tokens: 0, cost: 0, requests: 0 }
+      keys.set(id, entry)
+    }
+    return { entry, own }
+  }
+
+  for (const series of amount?.series ?? []) {
+    const { entry: key, own } = keyOf(series)
+    for (const bucket of series?.buckets ?? []) {
+      const time = Number(bucket?.time)
+      if (!Number.isFinite(time)) continue
+      const day = dayOf(localDayKey(time * 1000, tzSeconds))
+      for (const [type, value] of Object.entries(bucket?.usage ?? {})) {
+        const count = platformNumber(value)
+        if (count === 0) continue
+        if (type === 'REQUEST') {
+          day.requests += count
+          key.requests += count
+          if (own) day.ownRequests += count
+          continue
+        }
+        if (type !== 'PROMPT_CACHE_HIT_TOKEN' && type !== 'PROMPT_CACHE_MISS_TOKEN' && type !== 'RESPONSE_TOKEN') continue
+        day.tokens += count
+        key.tokens += count
+        if (type === 'PROMPT_CACHE_HIT_TOKEN') {
+          day.hit += count
+          if (own) day.ownHit += count
+        } else if (type === 'PROMPT_CACHE_MISS_TOKEN') {
+          day.miss += count
+          if (own) day.ownMiss += count
+        } else {
+          day.output += count
+          if (own) day.ownOutput += count
+        }
+        if (own) day.ownTokens += count
+      }
+    }
+  }
+
+  const blocks = Array.isArray(cost?.data) ? cost.data : []
+  const block = blocks.find((item) => item?.currency === 'CNY') ?? blocks.find((item) => item?.currency === 'USD') ?? blocks[0]
+  for (const series of block?.series ?? []) {
+    const { entry: key, own } = keyOf(series)
+    for (const bucket of series?.buckets ?? []) {
+      const time = Number(bucket?.time)
+      if (!Number.isFinite(time)) continue
+      const day = dayOf(localDayKey(time * 1000, tzSeconds))
+      const spend = platformNumber(bucket?.cost)
+      day.cost += spend
+      key.cost += spend
+      if (own) day.ownCost += spend
+    }
+  }
+
+  const totals = { tokens: 0, hit: 0, miss: 0, output: 0, requests: 0, cost: 0 }
+  const own = { tokens: 0, hit: 0, miss: 0, output: 0, requests: 0, cost: 0 }
+  for (const day of days.values()) {
+    totals.tokens += day.tokens
+    totals.hit += day.hit
+    totals.miss += day.miss
+    totals.output += day.output
+    totals.requests += day.requests
+    totals.cost += day.cost
+    own.tokens += day.ownTokens
+    own.hit += day.ownHit
+    own.miss += day.ownMiss
+    own.output += day.ownOutput
+    own.requests += day.ownRequests
+    own.cost += day.ownCost
+  }
+
+  // 面板的“今日”要的是今天那一格，不是 7 天合计。
+  const todayKey = localDayKey(options.now, tzSeconds)
+  const todayDay = days.get(todayKey)
+  const today = todayDay === undefined
+    ? { tokens: 0, hit: 0, miss: 0, output: 0, requests: 0, cost: 0 }
+    : {
+        tokens: todayDay.tokens,
+        hit: todayDay.hit,
+        miss: todayDay.miss,
+        output: todayDay.output,
+        requests: todayDay.requests,
+        cost: Math.round(todayDay.cost * 10000) / 10000,
+      }
+
+  return {
+    available: true,
+    currency: typeof block?.currency === 'string' ? block.currency : 'CNY',
+    fetchedAt: Date.now(),
+    day: todayKey,
+    today,
+    window: { ...totals, cost: Math.round(totals.cost * 10000) / 10000 },
+    // `own` 只作展示用（告诉用户 DSH 手里握的是哪把 Key），不参与加减：
+    // 实测 DSH 的推理走 OAuth，这把 Key 的流量来自别的客户端。
+    own: { ...own, name: [...keys.values()].find((key) => key.own)?.name },
+    days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    keys: [...keys.values()].sort((a, b) => b.tokens - a.tokens),
+  }
+}
+
+/**
+ * 读平台侧（全部 API Key）的用量；任何失败都只是「不可用」，不影响本机统计。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 插件上下文。
+ * @param {{ tzMinutes?: number, now?: number }} options 口径参数。
+ * @returns {Promise<Record<string, unknown>>} 平台用量块或失败原因。
+ */
+export async function readPlatformUsage(ctx, options = {}) {
+  const now = options.now ?? Date.now()
+  const tzMinutes = options.tzMinutes ?? -new Date().getTimezoneOffset()
+  const account = ctx.get('deepseekAccount')
+  if (account === undefined) return { available: false, reason: 'unavailable' }
+
+  let session
+  try {
+    session = await account.getPlatformSession()
+  } catch (error) {
+    return { available: false, reason: 'failed', message: describe(error) }
+  }
+  if (session === null || session === undefined || typeof session.token !== 'string') {
+    return { available: false, reason: 'signed-out' }
+  }
+
+  const origin = typeof session.origin === 'string' ? session.origin.replace(/\/+$/, '') : 'https://platform.deepseek.com'
+  const tzSeconds = -tzMinutes * 60
+  const window = usageWindow(now, tzSeconds, TREND_DAYS)
+  const query = `start=${window.start}&end=${window.end}&tz=${tzSeconds}`
+  const headers = { 'x-dsh-auth-token': session.token, accept: 'application/json' }
+
+  const [amountResult, costResult] = await Promise.allSettled([
+    platformJson(`${origin}${PLATFORM_USAGE_AMOUNT}?${query}`, headers, PLATFORM_USAGE_TIMEOUT_MS),
+    platformJson(`${origin}${PLATFORM_USAGE_COST}?${query}`, headers, PLATFORM_USAGE_TIMEOUT_MS),
+  ])
+
+  if (amountResult.status === 'rejected') {
+    const error = amountResult.reason
+    return {
+      available: false,
+      reason: error?.code === 'signed-out' ? 'signed-out' : 'failed',
+      message: describe(error),
+    }
+  }
+
+  const summary = summarizePlatform(
+    amountResult.value,
+    costResult.status === 'fulfilled' ? costResult.value : undefined,
+    { now, tzSeconds, ownKey: readOwnApiKey() },
+  )
+  if (costResult.status === 'rejected') summary.costNote = describe(costResult.reason)
+  return summary
+}
+
+/**
+ * 页面语言归约为 Platform 认识的 `zh_CN` / `en_US`。
+ * @param {string | null} raw 页面传来的语言。
+ * @returns {string} 平台语言。
+ */
+function wireLocale(raw) {
+  return String(raw ?? '').toLowerCase().split(/[-_]/)[0] === 'en' ? 'en_US' : 'zh_CN'
+}
+
+/**
+ * 解析页面传来的时区偏移（分钟，与 `Date.getTimezoneOffset()` 同号）。
+ * @param {string | null} raw 页面传来的值。
+ * @returns {number} 东为正的整秒偏移。
+ */
+function wireTimezone(raw) {
+  const minutes = Number(raw)
+  if (!Number.isFinite(minutes) || Math.abs(minutes) > 24 * 60) return -new Date().getTimezoneOffset() * 60
+  return -Math.round(minutes) * 60
+}
+
+/**
+ * 只保留钱包的可显示叶子字段，不把服务对象带出去。
+ * @param {{ currency?: unknown, balance?: unknown }} wallet 服务返回的钱包。
+ * @returns {{ currency: string, balance: string }} 纯 JSON 钱包。
+ */
+function pickWallet(wallet) {
+  return {
+    currency: String(wallet?.currency ?? 'CNY'),
+    balance: String(wallet?.balance ?? '0'),
+  }
+}
+
+/**
+ * 读一次余额，带超时。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 插件上下文。
+ * @param {{ locale: string, tz: string | null }} query 请求参数。
+ * @returns {Promise<Record<string, unknown>>} 纯 JSON 响应体。
+ */
+async function readBalance(ctx, query) {
+  const account = ctx.get('deepseekAccount')
+  if (account === undefined) {
+    return { ok: false, reason: 'unavailable', message: 'deepseekAccount 服务未挂载' }
+  }
+
+  const client = {
+    version: VERSION,
+    locale: wireLocale(query.locale),
+    timezoneOffsetSeconds: wireTimezone(query.tz),
+  }
+
+  /** @type {Record<string, unknown> | undefined} */
+  let links
+  try {
+    const state = await account.getState()
+    links = state?.links
+    if (state?.status !== 'credential-stored') {
+      return { ok: false, reason: 'signed-out', ...(links === undefined ? {} : { links }) }
+    }
+  } catch (error) {
+    return { ok: false, reason: 'failed', message: describe(error) }
+  }
+
+  let timer
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, reason: 'timeout', message: '余额查询超时' }), BALANCE_TIMEOUT_MS)
+  })
+
+  try {
+    const result = await Promise.race([account.getBalance(client), timeout])
+    if (result === undefined || result === null) {
+      return { ok: false, reason: 'signed-out', ...(links === undefined ? {} : { links }) }
+    }
+    if (result.ok === false) return result
+    if (result.status !== 'ready') {
+      return { ok: false, reason: 'failed', message: 'Platform 未返回余额', ...(links === undefined ? {} : { links }) }
+    }
+    return {
+      ok: true,
+      wallets: (Array.isArray(result.value) ? result.value : []).map(pickWallet),
+      bonusWallets: (Array.isArray(result.bonusWallets) ? result.bonusWallets : []).map(pickWallet),
+      fetchedAt: Date.now(),
+      ...(links === undefined ? {} : { links }),
+    }
+  } catch (error) {
+    return { ok: false, reason: 'failed', message: describe(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 带缓存与并发合并的余额读取。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 插件上下文。
+ * @param {{ locale: string, tz: string | null, force: boolean }} query 请求参数。
+ * @returns {Promise<Record<string, unknown>>} 纯 JSON 响应体。
+ */
+async function cachedBalance(ctx, query) {
+  const now = Date.now()
+  if (query.force !== true && balanceCache !== undefined && now - balanceCache.at < BALANCE_CACHE_TTL_MS) {
+    return { ...balanceCache.value, cached: true }
+  }
+  if (balanceInflight !== undefined) return balanceInflight
+
+  balanceInflight = readBalance(ctx, query)
+    .then((value) => {
+      // 只缓存成功结果：失败多半是瞬时问题，下次点击应该真的再试一次。
+      if (value.ok === true) balanceCache = { at: Date.now(), value }
+      return value
+    })
+    .finally(() => {
+      balanceInflight = undefined
+    })
+  return balanceInflight
+}
+
+/**
+ * 本机 DSH 会话的用量；失败也要给一个能看的结构。
+ * @param {number} now 当前毫秒时间戳。
+ * @returns {Record<string, unknown>} 本地用量块。
+ */
+function localUsage(now) {
+  try {
+    return aggregateUsage(now)
+  } catch (error) {
+    return {
+      day: dayKey(now),
+      available: false,
+      reason: 'aggregate-failed',
+      message: describe(error),
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      uncachedInputTokens: 0,
+      outputTokens: 0,
+      requests: 0,
+      cost: 0,
+      currency: 'CNY',
+      partial: true,
+    }
+  }
+}
+
+/**
+ * 合并「本机 DSH 会话」与「平台所有 API Key」两边的用量。
+ *
+ * 总计 = 本机 + 平台：DSH 的推理走账号（OAuth），平台按 Key 统计里看不到它；
+ * 反过来平台那部分包含 CC Switch 等其它客户端。两边都算进去才是“全部 token”。
+ * 唯一的重复风险是「DSH 自身也被配置成用某个 API Key」，所以界面上把两部分分开列。
+ *
+ * @param {Record<string, any>} local 本机用量块。
+ * @param {Record<string, any>} platform 平台用量块。
+ * @param {number} now 当前毫秒时间戳。
+ * @returns {Record<string, unknown>} 面板用的合并用量块。
+ */
+function mergeUsage(local, platform, now) {
+  const localHit = Number(local.cacheReadTokens) || 0
+  const localMiss = Number(local.uncachedInputTokens) || 0
+  const localOut = Number(local.outputTokens) || 0
+  const localRequests = Number(local.requests) || 0
+  const merged = platform.available === true
+
+  const remote = merged
+    ? {
+        tokens: platform.today?.tokens ?? 0,
+        hit: platform.today?.hit ?? 0,
+        miss: platform.today?.miss ?? 0,
+        output: platform.today?.output ?? 0,
+        requests: platform.today?.requests ?? 0,
+        cost: platform.today?.cost ?? 0,
+      }
+    : { tokens: 0, hit: 0, miss: 0, output: 0, requests: 0, cost: 0 }
+
+  return {
+    day: local.day ?? dayKey(now),
+    available: true,
+    source: merged ? 'merged' : 'local',
+    totalTokens: localHit + localMiss + localOut + remote.tokens,
+    cacheReadTokens: localHit + remote.hit,
+    uncachedInputTokens: localMiss + remote.miss,
+    outputTokens: localOut + remote.output,
+    requests: localRequests + remote.requests,
+    cost: Number(local.cost) || 0,
+    currency: typeof local.currency === 'string' ? local.currency : 'CNY',
+    peak: local.peak === true,
+    partial: local.partial === true,
+    local: {
+      totalTokens: localHit + localMiss + localOut,
+      cacheReadTokens: localHit,
+      uncachedInputTokens: localMiss,
+      outputTokens: localOut,
+      requests: localRequests,
+      cost: Number(local.cost) || 0,
+      available: local.available === true,
+    },
+    platform: merged
+      ? {
+          available: true,
+          currency: platform.currency,
+          day: platform.day,
+          today: platform.today,
+          window: platform.window,
+          own: platform.own,
+          days: platform.days,
+          keys: platform.keys,
+          ...(platform.costNote === undefined ? {} : { costNote: platform.costNote }),
+        }
+      : {
+          available: false,
+          reason: platform.reason ?? 'failed',
+          ...(platform.message === undefined ? {} : { message: platform.message }),
+        },
+  }
+}
+
+/**
+ * 一次性汇总（不走缓存）：本机 DSH 会话 + 平台所有 API Key。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 插件上下文。
+ * @param {{ tz?: string | null }} query 请求参数（只用到时区）。
+ * @param {number} now 当前毫秒时间戳。
+ * @returns {Promise<Record<string, unknown>>} 合并后的用量块。
+ */
+export async function collectUsage(ctx, query = {}, now = Date.now()) {
+  const minutes = Number(query.tz)
+  const tzMinutes = Number.isFinite(minutes) && Math.abs(minutes) <= 24 * 60 ? minutes : -new Date().getTimezoneOffset()
+  const [local, platform] = await Promise.all([
+    Promise.resolve(localUsage(now)),
+    readPlatformUsage(ctx, { now, tzMinutes }).catch((error) => ({
+      available: false,
+      reason: 'failed',
+      message: describe(error),
+    })),
+  ])
+  return mergeUsage(local, platform, now)
+}
+
+/**
+ * 带缓存的两路用量汇总。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 插件上下文。
+ * @param {{ force: boolean, tz: string | null }} query 请求参数。
+ * @returns {Promise<Record<string, unknown>>} 纯 JSON 用量块。
+ */
+async function cachedUsage(ctx, query) {
+  const now = Date.now()
+  if (query.force !== true && usageCache !== undefined && now - usageCache.at < USAGE_CACHE_TTL_MS) {
+    return { ...usageCache.value, cached: true }
+  }
+
+  const value = await collectUsage(ctx, query, now)
+  usageCache = { at: Date.now(), value }
+  return value
+}
+
+/**
+ * 发一个 JSON 响应。
+ * @param {import('node:http').ServerResponse} res 响应对象。
+ * @param {number} status HTTP 状态码。
+ * @param {unknown} body 响应体。
+ */
+function sendJson(res, status, body) {
+  const text = JSON.stringify(body)
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(text),
+    'Cache-Control': 'no-store',
+  })
+  res.end(text)
+}
+
+/**
+ * 解析查询串。
+ * @param {import('node:http').IncomingMessage} req 入站请求。
+ * @returns {{ locale: string, tz: string | null, force: boolean }} 归一化参数。
+ */
+function readQuery(req) {
+  let params
+  try {
+    params = new URL(req.url ?? '/', 'http://localhost').searchParams
+  } catch {
+    params = new URLSearchParams()
+  }
+  return {
+    locale: params.get('locale') ?? '',
+    tz: params.get('tz'),
+    force: params.get('force') === '1',
+  }
+}
+
+/**
+ * 插件主体。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 插件上下文。
+ */
+export function apply(ctx) {
+  const warn = (message) => {
+    try {
+      ctx.logger?.warn?.(`[${name}] ${message}`)
+    } catch {
+      /* 日志不该成为失败原因 */
+    }
+  }
+
+  ctx.on('dispose', () => {
+    balanceCache = undefined
+    balanceInflight = undefined
+    usageCache = undefined
+  })
+
+  ctx.inject(['webServer'], (child) => {
+    child.effect(() => {
+      const disposers = []
+
+      disposers.push(
+        child.webServer.register({
+          kind: 'exact',
+          path: BALANCE_ROUTE,
+          handler: (req, res) => {
+            const method = String(req.method ?? 'GET').toUpperCase()
+            if (method !== 'GET' && method !== 'HEAD') {
+              sendJson(res, 405, { ok: false, reason: 'method', message: 'use GET' })
+              return
+            }
+            const query = readQuery(req)
+            // 用量与余额并行：平台用量要走一次网络，不该让余额等它。
+            const usageTask = cachedUsage(ctx, query)
+            cachedBalance(ctx, query)
+              .then(async (balance) => {
+                // 用量与余额互不依赖：即使没登录，今日用量也照样能看。
+                sendJson(res, 200, { ...balance, usage: await usageTask })
+              })
+              .catch(async (error) => {
+                warn(`余额查询失败：${describe(error)}`)
+                sendJson(res, 200, {
+                  ok: false,
+                  reason: 'failed',
+                  message: describe(error),
+                  usage: await usageTask,
+                })
+              })
+          },
+        }),
+      )
+
+      disposers.push(
+        child.webServer.register({
+          kind: 'exact',
+          path: STATE_ROUTE,
+          handler: (_req, res) => {
+            const account = ctx.get('deepseekAccount')
+            let projectionFiles = 0
+            try {
+              projectionFiles = fs.readdirSync(PROJECTION_DIR).length
+            } catch {
+              projectionFiles = -1
+            }
+            const reply = {
+              ok: true,
+              plugin: name,
+              version: VERSION,
+              accountService: account === undefined ? 'absent' : 'mounted',
+              projectionDir: PROJECTION_DIR,
+              projectionFiles,
+              ledger: LEDGER_FILE,
+              platformSession: 'unknown',
+              ownApiKey: readOwnApiKey() === undefined ? 'absent' : 'configured',
+            }
+            // 只读本地凭据，不发网络请求：确认平台用量这条路有没有登录态可用。
+            const session = account?.getPlatformSession?.()
+            Promise.resolve(session)
+              .then((value) => {
+                reply.platformSession = value === null || value === undefined || typeof value.token !== 'string' ? 'absent' : 'present'
+              })
+              .catch(() => {
+                reply.platformSession = 'error'
+              })
+              .finally(() => sendJson(res, 200, reply))
+          },
+        }),
+      )
+
+      return () => {
+        for (const dispose of disposers) {
+          try {
+            dispose()
+          } catch {
+            /* 已经注销 */
+          }
+        }
+      }
+    })
+  })
+}

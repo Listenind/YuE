@@ -1,0 +1,10 @@
+# dsh-deepseek-balance 的 bundle patch 层。
+#
+# package.json 的 `dsh.bundle.patch` 指向本文件：DSH loader 会把它插进 profile 的
+# 组合树（在 bundle 层之后、用户自己的 cordis.patch.yml 之前）。
+#
+# 这里刻意不写 `config`：本插件没有可调配置，行为常量都在代码里（见 README
+# 的「可调项」一节）。
+- insert:
+    - id: dsh-deepseek-balance
+      name: dsh-deepseek-balance
