@@ -92,6 +92,25 @@ dsh plugin --profile desktop add dsh-deepseek-balance-panel
 
 > 只想发 GitHub 的话可以跳过这一节，用 `github:Listenind/YuE#main` 一样能装。
 
+### 发布后必须确认的两件事（2026-10 实测）
+
+1. **新包会先出现一个 `0.0.0-stage` 占位版本。**
+   npm 给「新包首发」建了一个描述为 *Temporary package placeholder for staged publishing* 的假版本，
+   它的 tarball 是坏的（安装会报 `ERR_PNPM_TARBALL_EXTRACT: Invalid checksum for TAR header`）。
+   发布成功后确认 `latest` 指向真实版本：
+
+   ```powershell
+   npm view dsh-deepseek-balance-panel dist-tags --registry=https://registry.npmjs.org
+   # { "latest": "1.6.0" }   ← 必须是真实版本，不是 0.0.0-stage
+   npm dist-tag add dsh-deepseek-balance-panel@1.6.0 latest --registry=https://registry.npmjs.org
+   ```
+
+2. **用完的发布 token 立刻删掉。**
+   本机 2FA 是安全密钥（WebAuthn）时，CLI 拿不到 6 位 OTP，只能用「Bypass 2FA」的 granular token 发布。
+   它等于一把带发布权的长期钥匙：去 <https://www.npmjs.com/settings/~/tokens> 删掉即可。
+   另外 npm 已宣布 **2027-01 移除 bypass-2fa token 的直接发布能力**，届时改用 GitHub Actions 的
+   Trusted Publishing（OIDC，不需要任何 token）。
+
 ## 4. 以后发新版本
 
 ```powershell
