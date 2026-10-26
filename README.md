@@ -1,4 +1,4 @@
-# dsh-deepseek-balance
+# dsh-deepseek-balance-panel
 
 在 DSH 右侧栏常驻一个「余额明细」标签页：上半是当前登录 DeepSeek 账号的**充值钱包 / 赠送钱包余额**，下半是**今日用量**——总消耗、缓存命中、缓存未命中、消费金额与 API 请求次数。
 
@@ -55,7 +55,7 @@
 
 柱子下面一行是统计：**日均**（只除有记录的天数）、**最高**（峰值那天的值，悬停看是哪天）、**较昨日**（今天相对昨天，涨用警示色、降用成功色；昨天没记录就显示 `—`）。
 
-数据来自**本机历史**（`localStorage` 键 `dsh-deepseek-balance/daily-v1`）：每次面板真的读到用量时，把当天这一格写成最新值（同一天覆盖，不累加），最多保留 40 天，取最近 7 天画。
+数据来自**本机历史**（`localStorage` 键 `dsh-deepseek-balance-panel/daily-v1`）：每次面板真的读到用量时，把当天这一格写成最新值（同一天覆盖，不累加），最多保留 40 天，取最近 7 天画。
 
 这样做的取舍很明确：
 
@@ -88,7 +88,7 @@
 
 - **今日** = 本地时区当天 00:00 起。
 - 今天创建的会话：累计值就是这个会话今天的全部用量，精确。
-- 跨天会话：以账本里「今天第一次看到它」的累计值做基线取差值；如果那天第一次采样晚于零点 10 分钟，面板会标注「跨天会话有部分用量未计入」。账本落在 `~/.dsh/dsh-deepseek-balance/usage-baselines.json`，每天自动换页。
+- 跨天会话：以账本里「今天第一次看到它」的累计值做基线取差值；如果那天第一次采样晚于零点 10 分钟，面板会标注「跨天会话有部分用量未计入」。账本落在 `~/.dsh/dsh-deepseek-balance-panel/usage-baselines.json`，每天自动换页。
 - **金额是估算**：投影只保存累计值，没有逐次请求的时间戳，所以按**当前时段**单价折算。DeepSeek 高峰（北京时间周内 9:00–12:00、14:00–18:00）单价是空闲时段的两倍，面板会明写这次用的是哪一档。价目表在 [index.js](index.js) 的 `PRICE_TABLE`，含 `deepseek-flash` 与 `deepseek-v4-pro`，未知模型按 flash 计。
 - 请求次数取 `sessionStats.steps`，即模型请求步数；一轮里多次工具调用会算多次。
 - 投影缓存在回合边界写入，所以数字可能比真实用量晚一个步骤。
@@ -97,7 +97,13 @@
 
 这是一个标准 DSH bundle（带 `dsh.bundle.patch`）。
 
-**从 GitHub 装（推荐，别人也用这条）：**
+**从 npm 装（推荐）：**
+
+```bash
+dsh plugin --profile desktop add dsh-deepseek-balance-panel
+```
+
+**从 GitHub 装（不经 npm，跟最新提交走）：**
 
 ```bash
 dsh plugin --profile desktop add github:Listenind/YuE#main
@@ -114,23 +120,23 @@ node scripts/install.mjs --profile <dir>      # 或指定 profile
 
 脚本做三件事：
 
-1. 把包复制到 `<profile>/plugins/dsh-deepseek-balance`（源）；
-2. 复制到 `<profile>/node_modules/dsh-deepseek-balance`（loader 实际解析的位置）；
-3. 在 profile 的 `package.json` 里登记 `dependencies` 与 `dsh.profile.bundles`（登记前会留一份 `package.json.bak-dsh-deepseek-balance`）。
+1. 把包复制到 `<profile>/plugins/dsh-deepseek-balance-panel`（源）；
+2. 复制到 `<profile>/node_modules/dsh-deepseek-balance-panel`（loader 实际解析的位置）；
+3. 在 profile 的 `package.json` 里登记 `dependencies` 与 `dsh.profile.bundles`（登记前会留一份 `package.json.bak-dsh-deepseek-balance-panel`）。
 
 DSH 会监听 profile 的 `package.json`，第一次装上一个**新名字**的 bundle 时宿主半边会即时装载。但注意两条平台约束：
 
 - **宿主半边**（`index.js`）改代码后必须重启 DSH。Node 的 ESM 模块缓存按 URL 记录，已加载的模块不会被重新求值，换目录、改 `package.json`、增删 bundle 都不会让它重新求值。
 - **客户端半边**（`lib/client.js`）改完刷新页面即可，必要时由 HMR 直接推送。
 
-所以 `node_modules/dsh-deepseek-balance` 做成指向 `plugins/dsh-deepseek-balance` 的目录联接（junction），客户端侧的改动才落在 HMR 的监听范围内（它默认忽略 `**/node_modules`）；宿主侧该重启时还是得重启。
+所以 `node_modules/dsh-deepseek-balance-panel` 做成指向 `plugins/dsh-deepseek-balance-panel` 的目录联接（junction），客户端侧的改动才落在 HMR 的监听范围内（它默认忽略 `**/node_modules`）；宿主侧该重启时还是得重启。
 
 自检：
 
 ```bash
-curl http://127.0.0.1:<port>/dsh-deepseek-balance/state
-# {"ok":true,"plugin":"deepseek-balance","version":"1.5.0","accountService":"mounted",...}
-curl 'http://127.0.0.1:<port>/dsh-deepseek-balance/balance'
+curl http://127.0.0.1:<port>/dsh-deepseek-balance-panel/state
+# {"ok":true,"plugin":"deepseek-balance-panel","version":"1.5.0","accountService":"mounted",...}
+curl 'http://127.0.0.1:<port>/dsh-deepseek-balance-panel/balance'
 ```
 
 运行测试（Node 22+，不需要安装依赖）：
@@ -158,7 +164,7 @@ npm test
 
 ### Host 接口
 
-`GET /dsh-deepseek-balance/balance?locale=zh-CN&tz=-480&force=1`
+`GET /dsh-deepseek-balance-panel/balance?locale=zh-CN&tz=-480&force=1`
 
 ```jsonc
 {
@@ -183,7 +189,7 @@ npm test
 余额失败时 `ok` 为 `false` 且带 `reason`（`signed-out` / `unavailable` / `failed` / `timeout`），`usage` 照旧返回。
 余额缓存 15 秒、用量缓存 30 秒，并合并同刻并发请求；`force=1` 同时绕过两者。
 
-`GET /dsh-deepseek-balance/state` 只做自检：插件是否装载、`deepseekAccount` 是否可见、投影缓存目录读到多少文件。
+`GET /dsh-deepseek-balance-panel/state` 只做自检：插件是否装载、`deepseekAccount` 是否可见、投影缓存目录读到多少文件。
 
 ## 可调项
 

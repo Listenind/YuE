@@ -74,7 +74,7 @@ const requireStub = (specifier) => {
 
 await import('../lib/client.js')
 assert.ok(registration, 'the bundle must register itself with the module loader')
-assert.equal(registration.id, 'dsh-deepseek-balance')
+assert.equal(registration.id, 'dsh-deepseek-balance-panel')
 
 const mod = registration.factory(requireStub)
 assert.equal(typeof mod.apply, 'function', 'client half must export apply')
@@ -107,7 +107,7 @@ const ctx = {
     getSnapshot: () => dictionary,
     bind: () => (key) => `t:${key}`,
     register: (ns, dicts) => {
-      assert.equal(ns, 'deepseekBalance')
+      assert.equal(ns, 'deepseekBalancePanel')
       assert.deepEqual(Object.keys(dicts.zh).sort(), Object.keys(dicts.en).sort(), 'zh/en key sets must match')
       dictionary.dicts = dicts
       return () => {}
@@ -137,18 +137,18 @@ mod.apply(ctx)
 
 assert.equal(tabDefinitions.length, 1, 'exactly one tab type is registered')
 const type = tabDefinitions[0]
-assert.equal(type.id, 'dsh-deepseek-balance')
-assert.equal(type.kind, 'deepseek-balance')
+assert.equal(type.id, 'dsh-deepseek-balance-panel')
+assert.equal(type.kind, 'deepseek-balance-panel')
 assert.equal(type.title(), 't:title')
 assert.equal(type.guide.length, 1)
 assert.equal(type.guide[0].title(), 't:guide.title')
 assert.equal(type.guide[0].description(), 't:guide.description')
 
-const body = slotRegistrations.get('sidebar.right.pane.tab|dsh-deepseek-balance')
-const title = slotRegistrations.get('sidebar.right.pane.tab.title|dsh-deepseek-balance')
+const body = slotRegistrations.get('sidebar.right.pane.tab|dsh-deepseek-balance-panel')
+const title = slotRegistrations.get('sidebar.right.pane.tab.title|dsh-deepseek-balance-panel')
 assert.ok(body, 'the pane body must register under the type id')
 assert.ok(title, 'the chip title must register under the type id')
-assert.equal(body.options.locale, 'deepseekBalance')
+assert.equal(body.options.locale, 'deepseekBalancePanel')
 
 /* ----------------------------------------------------------------- 渲染 -- */
 
@@ -395,7 +395,7 @@ assert.doesNotMatch(offline, /t:usage\.local /, 'no per-source rows without a pl
 
 /* ------------------------------------------------------------- 近 7 天趋势 -- */
 
-const HISTORY_KEY = 'dsh-deepseek-balance/daily-v1'
+const HISTORY_KEY = 'dsh-deepseek-balance-panel/daily-v1'
 /** 本机日期键，与客户端同一套算法。 */
 function dayKeyFor(back) {
   const date = new Date()

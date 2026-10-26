@@ -1,5 +1,5 @@
 /**
- * dsh-deepseek-balance —— 宿主半边。
+ * dsh-deepseek-balance-panel —— 宿主半边。
  *
  * 两件事：
  *   ① 从 `deepseekAccount` 读出当前登录账号的钱包余额（凭证仅限 Host，渲染层拿不到 token）；
@@ -22,16 +22,16 @@ import os from 'node:os'
 import path from 'node:path'
 
 /** Cordis 诊断用的插件名。 */
-export const name = 'deepseek-balance'
+export const name = 'deepseek-balance-panel'
 
 /** 没有必需服务；`webServer` 用 `ctx.inject` 迟到接入。 */
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.5.0'
+export const VERSION = '1.6.0'
 
 /** 所有路由共享的前缀。 */
-export const ROUTE_PREFIX = '/dsh-deepseek-balance'
+export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
 
 /** 余额 + 今日用量。 */
 export const BALANCE_ROUTE = `${ROUTE_PREFIX}/balance`
@@ -97,7 +97,7 @@ const DSH_HOME = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
 const PROJECTION_DIR = path.join(DSH_HOME, 'storages', 'session_projcache', 'sessions')
 
 /** 跨天会话的每日基线，落在插件自己的目录里。 */
-const LEDGER_FILE = path.join(DSH_HOME, 'dsh-deepseek-balance', 'usage-baselines.json')
+const LEDGER_FILE = path.join(DSH_HOME, 'dsh-deepseek-balance-panel', 'usage-baselines.json')
 
 /** 首次采样晚于零点多久就算"今天不完整"。 */
 const EXACT_WINDOW_MS = 10 * 60 * 1000

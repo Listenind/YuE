@@ -45,7 +45,7 @@ process.stdout.write(`verifying ${pkg.name}@${pkg.version}\n\n`)
 /* ------------------------------------------------------------------ 元数据 -- */
 
 process.stdout.write('metadata\n')
-check(pkg.name === 'dsh-deepseek-balance', 'package name is the canonical bundle name', pkg.name)
+check(pkg.name === 'dsh-deepseek-balance-panel', 'package name is the canonical bundle name', pkg.name)
 check(/^\d+\.\d+\.\d+/.test(pkg.version), 'version is semver', pkg.version)
 check(pkg.type === 'module', 'package is ESM')
 check(pkg.license === 'MIT', 'license is MIT')

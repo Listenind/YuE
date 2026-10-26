@@ -3,8 +3,8 @@
  * 把本包装进一个 DSH profile。
  *
  * 做三件事，全部幂等：
- *   ① 把包复制到 `<profile>/plugins/dsh-deepseek-balance`（源）；
- *   ② 复制到 `<profile>/node_modules/dsh-deepseek-balance`（loader 实际解析的位置）；
+ *   ① 把包复制到 `<profile>/plugins/dsh-deepseek-balance-panel`（源）；
+ *   ② 复制到 `<profile>/node_modules/dsh-deepseek-balance-panel`（loader 实际解析的位置）；
  *   ③ 在 profile 的 `package.json` 里登记 `dsh.profile.bundles` 与 `dependencies`。
  *
  * profile 取 `--profile <dir>`，其次是 `$DSH_PROFILE_DIR`，最后是
@@ -18,7 +18,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** 包名即 profile 里的依赖名与 bundle 名。 */
-const PKG = 'dsh-deepseek-balance'
+const PKG = 'dsh-deepseek-balance-panel'
 
 /** 本包根目录。 */
 const SRC = fileURLToPath(new URL('..', import.meta.url))

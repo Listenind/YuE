@@ -16,7 +16,7 @@ github:Listenind/YuE#main
 | --- | --- | --- |
 | **产物已提交**（`index.js` / `lib/` / `scripts/` / `cordis.patch.yml`） | ✅ 全在 git 里 | clone 下来没有能跑的东西 |
 | **没有 `prepare` / `prepack` / `postinstall`** | ✅ 一个都没有 | pnpm 会拒绝 git 依赖的构建脚本（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`），`dsh plugin add` 直接失败 |
-| **`dsh.bundle.patch` + 包名 + patch 里的 `name` 三者一致** | ✅ 都是 `dsh-deepseek-balance` | 插件不会成为一层；或 loader 只 warn 然后跳过（表现是「装上了但没生效」） |
+| **`dsh.bundle.patch` + 包名 + patch 里的 `name` 三者一致** | ✅ 都是 `dsh-deepseek-balance-panel` | 插件不会成为一层；或 loader 只 warn 然后跳过（表现是「装上了但没生效」） |
 
 这三条有自动化守着：
 
@@ -30,7 +30,7 @@ node scripts/verify.mjs
 
 ## 1. 建仓库
 
-浏览器方式：<https://github.com/new> → 名字填 **`dsh-deepseek-balance`** → **Public** →
+浏览器方式：<https://github.com/new> → 名字填 **`dsh-deepseek-balance-panel`** → **Public** →
 **不要**勾 "Add a README / .gitignore / license"（本地已经有了）→ Create。
 
 命令行方式（需 `gh`，本机目前没装）：
@@ -46,7 +46,7 @@ gh repo create Listenind/YuE --public --source . --push
 本地仓库已经初始化并提交好了，只差一个远端：
 
 ```powershell
-cd "D:\Programs\DSH Desktop 插件开发\plugins\dsh-deepseek-balance"
+cd "D:\Programs\DSH Desktop 插件开发\plugins\dsh-deepseek-balance-panel"
 git remote add origin https://github.com/Listenind/YuE.git
 git push -u origin main
 git push origin --tags
@@ -61,15 +61,36 @@ $env:DSH_HOME = "C:\Users\JIANG\AppData\Local\Temp\dsh-clean-home"
 dsh plugin --profile desktop add github:Listenind/YuE#main
 ```
 
-或者更直接：把整个 `~/.dsh/profiles/desktop/plugins/dsh-deepseek-balance` 目录临时改名，
+或者更直接：把整个 `~/.dsh/profiles/desktop/plugins/dsh-deepseek-balance-panel` 目录临时改名，
 在真机上装一次看看侧栏有没有出现「余额明细」。
 
 装完**重启 DSH**（宿主半边不会被 HMR 接管），然后用自检接口确认：
 
 ```powershell
-curl http://127.0.0.1:<port>/dsh-deepseek-balance/state
+curl http://127.0.0.1:<port>/dsh-deepseek-balance-panel/state
 # {"ok":true,...,"platformSession":"present","ownApiKey":"configured"}
 ```
+
+## 3.5 发布到 npm（让「只填包名」也能装）
+
+包名 `dsh-deepseek-balance-panel`（npm 上无人占用；`dsh-deepseek-balance` 已被别人的插件占着）。
+
+本机默认 registry 是 npmmirror 镜像，**镜像不能发布**，所以必须显式指定官方源：
+
+```powershell
+npm login --registry=https://registry.npmjs.org     # 浏览器登录，或 npm login --auth-type=legacy
+npm publish --access public --registry=https://registry.npmjs.org
+```
+
+发布前先跑 `node scripts/verify.mjs`（55 项）。`files` 白名单已经把产物列全，`README` / `LICENSE` 由 npm 自动带上。
+
+发布后别人就能：
+
+```bash
+dsh plugin --profile desktop add dsh-deepseek-balance-panel
+```
+
+> 只想发 GitHub 的话可以跳过这一节，用 `github:Listenind/YuE#main` 一样能装。
 
 ## 4. 以后发新版本
 
