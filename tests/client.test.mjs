@@ -377,8 +377,8 @@ const MERGED = {
     today: { tokens: 4_040_000, hit: 2_335_488, miss: 1_332_284, output: 374_579, requests: 132, cost: 1.89 },
     days: [],
     keys: [
-      { name: 'CC SWITCH', tokens: 9_000_000, todayTokens: 3_000_000, cost: 1.2, requests: 90, own: false },
-      { name: 'Deep Seek Hansen', tokens: 4_000_000, todayTokens: 1_040_000, cost: 0.69, requests: 42, own: true },
+      { name: 'CC SWITCH', tokens: 9_000_000, todayTokens: 3_000_000, todayCost: 1.2, cost: 1.2, requests: 90, own: false },
+      { name: 'Deep Seek Hansen', tokens: 4_000_000, todayTokens: 1_040_000, todayCost: 0.69, cost: 0.69, requests: 42, own: true },
     ],
   },
 }
@@ -401,9 +401,9 @@ assert.ok(sourceCard, 'the source chart card is rendered')
 const sourceText = textOf(sourceCard)
 process.stdout.write(`sources    : ${sourceText}\n`)
 assert.match(sourceText, /t:sources\.title/)
-assert.match(sourceText, /cordis\s+20M/, 'local presets are ranked by tokens')
-assert.match(sourceText, /qq-fish\s+5\.96M/, 'the bot shows up under its own preset id')
-assert.match(sourceText, /CC SWITCH\s+3M/, 'platform keys are ranked by today tokens')
+assert.match(sourceText, /cordis\s+20M\s+¥0\.9/i, 'local presets are ranked by tokens and priced')
+assert.match(sourceText, /qq-fish\s+5\.96M\s+¥0\.28/, 'the bot shows up under its own preset id, with its cost')
+assert.match(sourceText, /CC SWITCH\s+3M\s+¥1\.2/i, 'platform keys are ranked by today tokens and cost')
 const rows = sourceCard.children.slice(1).map((row) => textOf(row))
 assert.equal(rows[0].includes('cordis'), true, 'the biggest source comes first')
 assert.equal(rows.length, 4, 'every non-zero source gets a row')

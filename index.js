@@ -28,7 +28,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.7.2'
+export const VERSION = '1.7.3'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -587,7 +587,7 @@ function summarizePlatform(amount, cost, options) {
     const own = isOwnKey(apiKey, ownKey)
     let entry = keys.get(id)
     if (entry === undefined) {
-      entry = { name, own, tokens: 0, cost: 0, requests: 0, todayTokens: 0, todayRequests: 0 }
+      entry = { name, own, tokens: 0, cost: 0, requests: 0, todayTokens: 0, todayRequests: 0, todayCost: 0 }
       keys.set(id, entry)
     }
     return { entry, own }
@@ -639,10 +639,13 @@ function summarizePlatform(amount, cost, options) {
     for (const bucket of series?.buckets ?? []) {
       const time = Number(bucket?.time)
       if (!Number.isFinite(time)) continue
-      const day = dayOf(localDayKey(time * 1000, tzSeconds))
+      const date = localDayKey(time * 1000, tzSeconds)
+      const day = dayOf(date)
       const spend = platformNumber(bucket?.cost)
       day.cost += spend
       key.cost += spend
+      // 每把 Key 今天的金额：来源图要按「今天」展示，不能混进 7 天窗口。
+      if (date === todayDate) key.todayCost += spend
       if (own) day.ownCost += spend
     }
   }
