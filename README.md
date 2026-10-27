@@ -76,7 +76,9 @@
 | 平台 API Key | `platform.deepseek.com/api/v0/usage/by_api_key/amount` 与 `.../cost`（账号级，按 天 × Key × 模型 分桶） | 这个账号下**所有** API Key：CC Switch、Claude Code、脚本…… |
 | 来源细分 | 同一份投影缓存 + 平台接口，按会话的 `agentPreset` 与 API Key 名称分组 | 「谁在用」：机器人、小号、脚本各自一行（本机那部分不重复计入总计） |
 
-面板把两路**相加**：只统计本机会漏掉 CC Switch 的消耗，只统计平台会漏掉 DSH 的 OAuth 消耗。
+面板默认把两路**相加**：只统计本机会漏掉别的客户端的消耗，只统计平台会漏掉走账号（OAuth）的 DSH 会话。
+但当 DSH 自己也在用某把 API Key 推理时（`provider: deepseek-official` → `llm-deepseek`），同一批请求会同时出现在两边 ——
+这时宿主会把「本机量落在平台里那把 Key 的 0.4x–1.6x 区间内」判定为重叠，总计改用平台口径（与官网用量页同源），本机只作为「其中」的核对行，不再相加。
 两个数在卡片里分开列出，相加后的总计才是「全部 token」。
 
 - 平台接口是网页版用量页用的**私有接口**，鉴权头是 `x-dsh-auth-token`（`Authorization: Bearer` 会被 `40003` 拒），凭据从 `deepseekAccount.getPlatformSession()` 拿，不落盘、不外传。

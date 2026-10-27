@@ -408,7 +408,31 @@ const rows = sourceCard.children.slice(1).map((row) => textOf(row))
 assert.equal(rows[0].includes('cordis'), true, 'the biggest source comes first')
 assert.equal(rows.length, 4, 'every non-zero source gets a row')
 
-// 平台不可用时退回本机口径，并明说只统计本机会话。
+// 重叠口径：DSH 自己就用这把 Key 时，本机只是平台的一个子集，总计按平台算一次。
+const overlapText = textOf(
+  renderTree({
+    status: 'ready',
+    data: {
+      ...wallet,
+      usage: {
+        ...MERGED,
+        overlap: true,
+        totalTokens: 4_040_000,
+        cacheReadTokens: 2_335_488,
+        uncachedInputTokens: 1_332_284,
+        outputTokens: 374_579,
+        requests: 132,
+        cost: 1.89,
+      },
+    },
+  }),
+)
+process.stdout.write(`overlap    : ${overlapText}\n`)
+assert.match(overlapText, /t:usage\.localOverlap 25\.96M/, 'the local row says it is a subset')
+assert.match(overlapText, /t:usage\.cost ≈¥1\.89/, 'cost is the platform spend only')
+assert.match(overlapText, /t:usage\.dedupNote/, 'the de-duplication is explained')
+assert.doesNotMatch(overlapText, /t:usage\.mergedNote/, 'no addition note when the totals overlap')
+
 const offline = textOf(
   renderTree({
     status: 'ready',

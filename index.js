@@ -28,7 +28,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.7.0'
+export const VERSION = '1.7.1'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -678,12 +678,15 @@ function summarizePlatform(amount, cost, options) {
         cost: Math.round(todayDay.cost * 10000) / 10000,
       }
 
+  const ownKeyToday = [...keys.values()].find((key) => key.own)
+
   return {
     available: true,
     currency: typeof block?.currency === 'string' ? block.currency : 'CNY',
     fetchedAt: Date.now(),
     day: todayKey,
     today,
+    ownTodayTokens: ownKeyToday?.todayTokens ?? 0,
     window: { ...totals, cost: Math.round(totals.cost * 10000) / 10000 },
     // `own` 只作展示用（告诉用户 DSH 手里握的是哪把 Key），不参与加减：
     // 实测 DSH 的推理走 OAuth，这把 Key 的流量来自别的客户端。
@@ -905,9 +908,21 @@ function mergeUsage(local, platform, now) {
   const localCost = Number(local.cost) || 0
   const merged = platform.available === true
 
-  // 本机那半边按「来源」（agentPreset）拆细；它整份都已经在 local 里，所以这里只做展示，
-  // 不从总量里减任何东西：总计 = 本机 + 平台。
+  // 本机那半边按「来源」（agentPreset）拆细；它整份都已经在 local 里，所以这里只做展示。
   const sources = Array.isArray(local.sources) ? local.sources : []
+
+  /**
+   * 本机与平台是不是同一批请求？
+   *
+   * DSH 自己如果用 API Key 推理（provider deepseek-official → llm-deepseek），那它的 token
+   * 既进本机投影缓存、也进平台的按 Key 统计——相加就会翻倍（实测 81M + 62M 对不上官网的 70M）。
+   * 判断依据：本机量落在“平台里那把属于 DSH 的 Key”的 0.4x–1.6x 区间内，就认为两者重叠，
+   * 总计改用平台数（和官网同源）。DSH 走账号（OAuth）时本机会明显更大，仍然相加。
+   */
+  const ownTodayTokens = Number(platform.ownTodayTokens) || 0
+  const localTokens = localHit + localMiss + localOut
+  const overlap =
+    merged && ownTodayTokens > 0 && localTokens > 0 && localTokens >= ownTodayTokens * 0.4 && localTokens <= ownTodayTokens * 1.6
 
   const remote = merged
     ? {
@@ -924,12 +939,14 @@ function mergeUsage(local, platform, now) {
     day: local.day ?? dayKey(now),
     available: true,
     source: merged ? 'merged' : 'local',
-    totalTokens: localHit + localMiss + localOut + remote.tokens,
-    cacheReadTokens: localHit + remote.hit,
-    uncachedInputTokens: localMiss + remote.miss,
-    outputTokens: localOut + remote.output,
-    requests: localRequests + remote.requests,
-    cost: localCost,
+    // 重叠时以平台为准（它和官网同源）；否则两边相加。
+    overlap,
+    totalTokens: overlap ? remote.tokens : localTokens + remote.tokens,
+    cacheReadTokens: overlap ? remote.hit : localHit + remote.hit,
+    uncachedInputTokens: overlap ? remote.miss : localMiss + remote.miss,
+    outputTokens: overlap ? remote.output : localOut + remote.output,
+    requests: overlap ? remote.requests : localRequests + remote.requests,
+    cost: overlap ? remote.cost : localCost + remote.cost,
     currency: typeof local.currency === 'string' ? local.currency : 'CNY',
     peak: local.peak === true,
     partial: local.partial === true,
