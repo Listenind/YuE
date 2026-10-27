@@ -28,7 +28,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.6.0'
+export const VERSION = '1.7.0'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -98,6 +98,15 @@ const PROJECTION_DIR = path.join(DSH_HOME, 'storages', 'session_projcache', 'ses
 
 /** 跨天会话的每日基线，落在插件自己的目录里。 */
 const LEDGER_FILE = path.join(DSH_HOME, 'dsh-deepseek-balance-panel', 'usage-baselines.json')
+
+/**
+ * 会话来源的分组维度：`agentPreset`。
+ *
+ * 面板不该知道"QQ 机器人"这种具体插件——同一个人可能同时用 GUI、机器人、自己的小号脚本，
+ * 这些在 DSH 里都只是"某个 preset 下的一批会话"。所以本机按 preset 分组、平台按 API Key 分组，
+ * 两边都是通用口径，谁在用就叫什么。
+ */
+const NO_SOURCE_LABEL = '(默认)'
 
 /** 首次采样晚于零点多久就算"今天不完整"。 */
 const EXACT_WINDOW_MS = 10 * 60 * 1000
@@ -181,6 +190,37 @@ function costOf(tokens, price, band) {
 }
 
 /**
+ * 建一个「来源 → 累计」的收集器。
+ * @returns {{ add: (source: string, delta: Record<string, number>, cost: number) => void, list: () => { source: string, sessions: number, totalTokens: number, requests: number, cost: number }[] }} 收集器。
+ */
+function createSourceTally() {
+  const map = new Map()
+  return {
+    add(source, delta, cost) {
+      const entry = map.get(source) ?? { source, sessions: 0, hit: 0, miss: 0, output: 0, requests: 0, cost: 0 }
+      entry.sessions += 1
+      entry.hit += delta.cacheRead
+      entry.miss += delta.uncached
+      entry.output += delta.output
+      entry.requests += delta.requests
+      entry.cost += cost
+      map.set(source, entry)
+    },
+    list() {
+      return [...map.values()]
+        .map((entry) => ({
+          source: entry.source,
+          sessions: entry.sessions,
+          totalTokens: entry.hit + entry.miss + entry.output,
+          requests: entry.requests,
+          cost: Math.round(entry.cost * 10000) / 10000,
+        }))
+        .sort((a, b) => b.totalTokens - a.totalTokens)
+    },
+  }
+}
+
+/**
  * 读当天的基线账本。
  * @param {string} day 日期键。
  * @returns {{ day: string, sessions: Record<string, Record<string, number>> }} 账本。
@@ -213,13 +253,14 @@ function writeLedger(ledger) {
 /**
  * 从一个投影缓存记录里取出需要的那几个叶子值。
  * @param {Record<string, any>} record 投影缓存的 `record`。
- * @returns {{ tokens: { cacheRead: number, uncached: number, output: number, requests: number }, createdAt: number | undefined, model: string | undefined } | undefined}}
+ * @returns {{ tokens: { cacheRead: number, uncached: number, output: number, requests: number }, createdAt: number | undefined, model: string | undefined, preset: string | undefined } | undefined}}
  */
 function readRecord(record) {
   const totals = record?.rows?.tokenUsage?.val?.totals
   if (totals === undefined || typeof totals !== 'object') return undefined
   const steps = record?.rows?.sessionStats?.val?.steps
   const model = record?.rows?.modelSelection?.val?.lastUsed?.model
+  const preset = record?.rows?.agentPreset?.val
   return {
     tokens: {
       cacheRead: count(totals.cacheReadTokens),
@@ -227,6 +268,7 @@ function readRecord(record) {
       output: count(totals.outputTokens),
       requests: count(steps),
     },
+    preset: typeof preset === 'string' ? preset : undefined,
     createdAt: typeof record?.identity?.createdAt === 'number' ? record.identity.createdAt : undefined,
     model: typeof model === 'string' ? model : undefined,
   }
@@ -256,6 +298,9 @@ export function aggregateUsage(now = Date.now()) {
   const sum = { cacheRead: 0, uncached: 0, output: 0, requests: 0 }
   const state = { sessions: 0, skipped: 0, partial: false, cost: 0 }
 
+  // 按「来源」（agentPreset）分一份账，给面板做通用细分。
+  const sources = createSourceTally()
+
   let names = []
   try {
     names = fs.readdirSync(PROJECTION_DIR)
@@ -275,6 +320,7 @@ export function aggregateUsage(now = Date.now()) {
       currency: 'CNY',
       peak,
       partial: true,
+      sources: [],
     }
   }
 
@@ -340,8 +386,11 @@ export function aggregateUsage(now = Date.now()) {
     sum.uncached += delta.uncached
     sum.output += delta.output
     sum.requests += delta.requests
-    state.cost += costOf(delta, price, band)
+    const cost = costOf(delta, price, band)
+    state.cost += cost
     state.sessions += 1
+
+    sources.add(parsed.preset ?? NO_SOURCE_LABEL, delta, cost)
   }
 
   // 清理账本里已经消失的会话（被删档），避免文件无限增长。
@@ -368,6 +417,7 @@ export function aggregateUsage(now = Date.now()) {
     peak,
     partial: state.partial,
     ledger: ledgerWritable ? 'ok' : 'read-only',
+    sources: sources.list(),
   }
 }
 
@@ -537,30 +587,36 @@ function summarizePlatform(amount, cost, options) {
     const own = isOwnKey(apiKey, ownKey)
     let entry = keys.get(id)
     if (entry === undefined) {
-      entry = { name, own, tokens: 0, cost: 0, requests: 0 }
+      entry = { name, own, tokens: 0, cost: 0, requests: 0, todayTokens: 0, todayRequests: 0 }
       keys.set(id, entry)
     }
     return { entry, own }
   }
+
+  const todayDate = localDayKey(options.now, tzSeconds)
 
   for (const series of amount?.series ?? []) {
     const { entry: key, own } = keyOf(series)
     for (const bucket of series?.buckets ?? []) {
       const time = Number(bucket?.time)
       if (!Number.isFinite(time)) continue
-      const day = dayOf(localDayKey(time * 1000, tzSeconds))
+      const date = localDayKey(time * 1000, tzSeconds)
+      const day = dayOf(date)
+      const isToday = date === todayDate
       for (const [type, value] of Object.entries(bucket?.usage ?? {})) {
         const count = platformNumber(value)
         if (count === 0) continue
         if (type === 'REQUEST') {
           day.requests += count
           key.requests += count
+          if (isToday) key.todayRequests += count
           if (own) day.ownRequests += count
           continue
         }
         if (type !== 'PROMPT_CACHE_HIT_TOKEN' && type !== 'PROMPT_CACHE_MISS_TOKEN' && type !== 'RESPONSE_TOKEN') continue
         day.tokens += count
         key.tokens += count
+        if (isToday) key.todayTokens += count
         if (type === 'PROMPT_CACHE_HIT_TOKEN') {
           day.hit += count
           if (own) day.ownHit += count
@@ -846,7 +902,12 @@ function mergeUsage(local, platform, now) {
   const localMiss = Number(local.uncachedInputTokens) || 0
   const localOut = Number(local.outputTokens) || 0
   const localRequests = Number(local.requests) || 0
+  const localCost = Number(local.cost) || 0
   const merged = platform.available === true
+
+  // 本机那半边按「来源」（agentPreset）拆细；它整份都已经在 local 里，所以这里只做展示，
+  // 不从总量里减任何东西：总计 = 本机 + 平台。
+  const sources = Array.isArray(local.sources) ? local.sources : []
 
   const remote = merged
     ? {
@@ -868,7 +929,7 @@ function mergeUsage(local, platform, now) {
     uncachedInputTokens: localMiss + remote.miss,
     outputTokens: localOut + remote.output,
     requests: localRequests + remote.requests,
-    cost: Number(local.cost) || 0,
+    cost: localCost,
     currency: typeof local.currency === 'string' ? local.currency : 'CNY',
     peak: local.peak === true,
     partial: local.partial === true,
@@ -878,8 +939,10 @@ function mergeUsage(local, platform, now) {
       uncachedInputTokens: localMiss,
       outputTokens: localOut,
       requests: localRequests,
-      cost: Number(local.cost) || 0,
+      cost: Math.round(localCost * 10000) / 10000,
       available: local.available === true,
+      // 按 agentPreset 的来源细分（机器人 / GUI / 小号脚本……都只是不同的 preset）。
+      sources,
     },
     platform: merged
       ? {

@@ -206,7 +206,16 @@ assert.equal(usage.platform.days[0].date, todayKey)
 assert.equal(usage.platform.keys[0].name, 'CC SWITCH')
 assert.equal(usage.platform.own.name, undefined, 'the stub key is not the local DEEPSEEK_API_KEY')
 
-// 总计 = 本机 + 平台今天
+// 本机按来源（agentPreset）分组，平台按 API Key 分组 —— 都是通用维度。
+assert.ok(Array.isArray(usage.local.sources), 'local usage carries per-source groups')
+assert.equal(typeof usage.local.sources.length, 'number')
+assert.ok(Array.isArray(usage.platform.keys), 'platform usage carries per-key groups')
+assert.ok(
+  usage.platform.keys.every((key) => typeof key.todayTokens === 'number'),
+  'each platform key reports its own share of today',
+)
+
+// 总计 = 本机 + 平台今天（来源细分只是展示，不参与加减）
 assert.equal(
   usage.totalTokens,
   usage.local.totalTokens + usage.platform.today.tokens,
@@ -218,5 +227,9 @@ assert.equal(
   usage.local.cacheReadTokens + usage.platform.today.hit,
   'hit tokens are summed across both sources',
 )
+
+// 本机各来源加起来必须等于本机总量（不能凭空多出来或漏掉）。
+const sourceTotal = usage.local.sources.reduce((sum, entry) => sum + entry.totalTokens, 0)
+assert.equal(sourceTotal, usage.local.totalTokens, 'per-source groups add up to the local total')
 
 process.stdout.write('\nall host assertions passed\n')

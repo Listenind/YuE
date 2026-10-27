@@ -7,6 +7,7 @@
 - 面板被折叠 / 切到别的标签 / 切到后台会话时不轮询。
 - 未登录、账号服务缺失、查询失败各有独立空状态，绝不把失败显示成 0 元；**余额读不到时今日用量照常显示**。
 - 「今日消耗」卡片把三段 token 都摆出来：**命中 / 未命中 / 输出**；上面那根占比条只讲输入侧的命中率。
+- 趋势图下面还有一张**来源用量**图：把今天的 token 按「谁用的」排开——本机按会话的 agent preset 分组（机器人会以它自己的 preset id 出现，比如 `qq-fish`），平台按 API Key 分组（小号 / 脚本用自己的 Key 就单独一条）。
 - 「按空闲/高峰时段单价估算」这行说明下面是一张**近 7 天趋势**柱状图，附「日均 / 最高 / 较昨日」三格统计。
 
 ## 它长什么样
@@ -73,6 +74,7 @@
 | --- | --- | --- |
 | 本机 DSH | DSH 会话投影缓存 `~/.dsh/storages/session_projcache/sessions/*.json` 的 `tokenUsage.totals` / `sessionStats.steps` | 这台机器上 DSH 自己跑的会话（走账号 OAuth，平台按 Key 的统计里看不到） |
 | 平台 API Key | `platform.deepseek.com/api/v0/usage/by_api_key/amount` 与 `.../cost`（账号级，按 天 × Key × 模型 分桶） | 这个账号下**所有** API Key：CC Switch、Claude Code、脚本…… |
+| 来源细分 | 同一份投影缓存 + 平台接口，按会话的 `agentPreset` 与 API Key 名称分组 | 「谁在用」：机器人、小号、脚本各自一行（本机那部分不重复计入总计） |
 
 面板把两路**相加**：只统计本机会漏掉 CC Switch 的消耗，只统计平台会漏掉 DSH 的 OAuth 消耗。
 两个数在卡片里分开列出，相加后的总计才是「全部 token」。
@@ -82,6 +84,17 @@
 - 两边理论上可能重叠：如果 DSH 自身也被配置成用某个 API Key，那部分会同时出现在两处。实测本机 DSH 走 OAuth，平台里那把 `DEEPSEEK_API_KEY` 的流量来自别的客户端，因此没有做扣减；卡片里能看到两行分别是多少。
 - 平台接口失败（未登录 / 登录态失效 / 网络）时自动退回「仅本机」口径，并在卡片下方注明。
 - 余额仍然走 Host `deepseekAccount.getBalance()`（Platform `get_user_summary`）。
+
+## 来源用量
+
+趋势图下面那张横向条形图回答「今天的 token 是谁用的」：
+
+- **本机**：按会话的 `agentPreset` 分组。机器人插件会以它自己的 preset id 出现（例如 `qq-fish`），你用 GUI 的会话是 `cordis` / `standard` 之类——面板不猜任何具体插件，preset 叫什么就显示什么。
+- **平台**：按 API Key 名称分组。你用小号 / 脚本调 DeepSeek 时用的是哪把 Key，就显示哪个名字。
+
+只画今天真正有消耗的来源，最多 6 条，按 token 从多到少排。鼠标悬停一条会给出「本机/平台 · 名字 · 精确 token 数」。三种来源加起来等于卡片顶部那个总数，不会重复计算。
+
+> 名字来自 DSH 自己的标识：`agentPreset` id 与 Platform 的 Key 名称。想让机器人那行更好认，就把 `dsh-qq-bot` 的 `agentPreset` 起一个明白的名字；想让小号那行更好认，就在 Platform 里给那把 Key 改个名。
 
 ### 两条口径各自的口径与误差
 

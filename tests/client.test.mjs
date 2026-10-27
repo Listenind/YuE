@@ -365,23 +365,48 @@ const MERGED = {
     requests: 168,
     cost: 1.18,
     available: true,
+    // 通用来源细分：名字就是 agentPreset id，不假设是哪款插件。
+    sources: [
+      { source: 'cordis', totalTokens: 20_000_000, requests: 120, cost: 0.9 },
+      { source: 'qq-fish', totalTokens: 5_960_000, requests: 48, cost: 0.28 },
+    ],
   },
   platform: {
     available: true,
     currency: 'CNY',
     today: { tokens: 4_040_000, hit: 2_335_488, miss: 1_332_284, output: 374_579, requests: 132, cost: 1.89 },
     days: [],
-    keys: [],
+    keys: [
+      { name: 'CC SWITCH', tokens: 9_000_000, todayTokens: 3_000_000, cost: 1.2, requests: 90, own: false },
+      { name: 'Deep Seek Hansen', tokens: 4_000_000, todayTokens: 1_040_000, cost: 0.69, requests: 42, own: true },
+    ],
   },
 }
 const mergedText = textOf(renderTree({ status: 'ready', data: { ...wallet, usage: MERGED } }))
 process.stdout.write(`merged     : ${mergedText}\n`)
 assert.match(mergedText, /t:usage\.local 25\.96M · 168 t:usage\.requestsUnit/, 'the local half is broken out')
+assert.match(mergedText, /t:usage\.sources cordis 20M · qq-fish 5\.96M/, 'local usage is split by agent preset')
 assert.match(mergedText, /t:usage\.platform 4\.04M · 132 t:usage\.requestsUnit/, 'the platform half is broken out')
+assert.match(mergedText, /t:usage\.keys CC SWITCH 3M · Deep Seek Hansen 1\.04M/, 'platform usage is split by API key')
 assert.match(mergedText, /t:usage\.cost ≈¥3\.07/, 'cost adds the local estimate and the platform spend')
-assert.match(mergedText, /300 t:usage\.requestsUnit/, 'the request total covers both sources')
+assert.match(mergedText, /300 t:usage\.requestsUnit/, 'the request total covers every source')
 assert.match(mergedText, /t:usage\.mergedNote/, 'the merge is explained')
 assert.doesNotMatch(mergedText, /t:usage\.platformOff/, 'no "platform unavailable" note when it is available')
+assert.doesNotMatch(mergedText, /t:usage\.qq/, 'no plugin-specific row: the split is generic')
+
+// 第三张图：按来源的今日排行（本机 preset + 平台 Key，同一个列表按用量排序）。
+const mergedTree = renderTree({ status: 'ready', data: { ...wallet, usage: MERGED } })
+const sourceCard = mergedTree.children[usageIndex].children.find((node) => node?.props?.className === 'dsb-card dsb-sources')
+assert.ok(sourceCard, 'the source chart card is rendered')
+const sourceText = textOf(sourceCard)
+process.stdout.write(`sources    : ${sourceText}\n`)
+assert.match(sourceText, /t:sources\.title/)
+assert.match(sourceText, /cordis\s+20M/, 'local presets are ranked by tokens')
+assert.match(sourceText, /qq-fish\s+5\.96M/, 'the bot shows up under its own preset id')
+assert.match(sourceText, /CC SWITCH\s+3M/, 'platform keys are ranked by today tokens')
+const rows = sourceCard.children.slice(1).map((row) => textOf(row))
+assert.equal(rows[0].includes('cordis'), true, 'the biggest source comes first')
+assert.equal(rows.length, 4, 'every non-zero source gets a row')
 
 // 平台不可用时退回本机口径，并明说只统计本机会话。
 const offline = textOf(
