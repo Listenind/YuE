@@ -433,6 +433,32 @@ assert.match(overlapText, /t:usage\.cost ≈¥1\.89/, 'cost is the platform spen
 assert.match(overlapText, /t:usage\.dedupNote/, 'the de-duplication is explained')
 assert.doesNotMatch(overlapText, /t:usage\.mergedNote/, 'no addition note when the totals overlap')
 
+// 旧宿主（没有 overlap 字段）时客户端要能自己看出来：本机 4M vs 平台 4.04M → 同一批请求。
+const inferredText = textOf(
+  renderTree({
+    status: 'ready',
+    data: {
+      ...wallet,
+      usage: {
+        ...MERGED,
+        local: {
+          ...MERGED.local,
+          totalTokens: 4_000_000,
+          cacheReadTokens: 2_300_000,
+          uncachedInputTokens: 1_330_000,
+          outputTokens: 370_000,
+          requests: 130,
+          cost: 1.8,
+        },
+      },
+    },
+  }),
+)
+process.stdout.write(`inferred   : ${inferredText}\n`)
+assert.match(inferredText, /t:usage\.localOverlap/, 'a comparable local total is treated as the same traffic')
+assert.match(inferredText, /t:usage\.cost ≈¥1\.89/, 'cost follows the platform, not local + platform')
+assert.match(inferredText, /4\.04M t:usage\.unit/, 'the headline uses the platform total')
+
 const offline = textOf(
   renderTree({
     status: 'ready',
