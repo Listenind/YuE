@@ -92,6 +92,7 @@ const body = JSON.parse(res.body)
 process.stdout.write(`\nresponse:\n${JSON.stringify(body, null, 2)}\n`)
 
 assert.equal(body.ok, true, 'balance succeeds')
+assert.equal(body.version, VERSION, 'the payload carries the running plugin version')
 assert.equal(body.wallets[0].balance, '9.3517273800000000')
 assert.ok(body.usage !== undefined, 'the usage block rides along with the balance')
 assert.equal(body.usage.available, true)

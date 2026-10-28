@@ -28,7 +28,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.8.0'
+export const VERSION = '1.8.1'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -1276,7 +1276,7 @@ export function apply(ctx) {
             cachedBalance(ctx, query)
               .then(async (balance) => {
                 // 用量与余额互不依赖：即使没登录，今日用量也照样能看。
-                sendJson(res, 200, { ...balance, usage: await usageTask })
+                sendJson(res, 200, { ...balance, version: VERSION, usage: await usageTask })
               })
               .catch(async (error) => {
                 warn(`余额查询失败：${describe(error)}`)
@@ -1284,6 +1284,7 @@ export function apply(ctx) {
                   ok: false,
                   reason: 'failed',
                   message: describe(error),
+                  version: VERSION,
                   usage: await usageTask,
                 })
               })

@@ -656,4 +656,11 @@ const applyingText = textOf(
 )
 assert.match(applyingText, /t:update\.applying/, 'the button reports progress while installing')
 
+// 页脚显示当前版本，更新前后一眼能看出来。
+const versionText = textOf(
+  renderTree({ status: 'ready', data: { ...wallet, usage: USAGE, version: '1.8.1' } }),
+)
+process.stdout.write(`version    : ${versionText.slice(-60)}\n`)
+assert.match(versionText, /v1\.8\.1/, 'the footer shows the running version')
+
 process.stdout.write('\nall client-half assertions passed\n')
