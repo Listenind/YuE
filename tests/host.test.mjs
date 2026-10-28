@@ -62,8 +62,18 @@ const ctx = {
   },
 }
 
-const { apply, BALANCE_ROUTE, STATE_ROUTE, UPDATE_ROUTE, VERSION, checkUpdate, compareVersions, installedSpec } =
-  await import('../index.js')
+const {
+  apply,
+  BALANCE_ROUTE,
+  STATE_ROUTE,
+  UPDATE_ROUTE,
+  UPDATE_APPLY_ROUTE,
+  VERSION,
+  checkUpdate,
+  compareVersions,
+  installedSpec,
+  installedVersionOnDisk,
+} = await import('../index.js')
 apply(ctx)
 
 /** Invoke a route handler and wait until it writes a response. */
@@ -78,8 +88,8 @@ async function call(handler, req) {
 
 assert.deepEqual(
   [...routes.keys()].sort(),
-  [BALANCE_ROUTE, STATE_ROUTE, UPDATE_ROUTE].sort(),
-  'balance, state and update routes are registered',
+  [BALANCE_ROUTE, STATE_ROUTE, UPDATE_ROUTE, UPDATE_APPLY_ROUTE].sort(),
+  'balance, state, update and update/apply routes are registered',
 )
 
 const handler = routes.get(BALANCE_ROUTE).handler
@@ -322,5 +332,14 @@ const updateReply = await call(updateRoute.handler, { method: 'GET', url: UPDATE
 const updateBody = JSON.parse(updateReply.body)
 assert.ok([true, false].includes(updateBody.ok), 'the update route answers with a status')
 assert.equal(updateBody.current, VERSION, 'the update route reports the running version')
+
+// 执行更新只接受 POST：GET 一律 405（测试里绝不去真的跑 pnpm）。
+const applyRoute = routes.get(UPDATE_APPLY_ROUTE)
+assert.ok(applyRoute, `${UPDATE_APPLY_ROUTE} must be registered`)
+const wrongMethod = await call(applyRoute.handler, { method: 'GET', url: UPDATE_APPLY_ROUTE })
+assert.equal(wrongMethod.status, 405, 'apply rejects GET')
+
+// 磁盘版本读取：profile 装了包就该拿到版本号，读不到也不能抛。
+assert.equal(typeof installedVersionOnDisk(), 'string')
 
 process.stdout.write('\nall host assertions passed\n')

@@ -20,6 +20,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 
 /** Cordis 诊断用的插件名。 */
 export const name = 'deepseek-balance-panel'
@@ -28,7 +29,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.8.5'
+export const VERSION = '1.8.6'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -41,6 +42,9 @@ export const STATE_ROUTE = `${ROUTE_PREFIX}/state`
 
 /** 更新检查：当前版本、最新版本、能不能一键更新。 */
 export const UPDATE_ROUTE = `${ROUTE_PREFIX}/update`
+
+/** 执行更新：POST，宿主在 profile 里跑 `pnpm add`。 */
+export const UPDATE_APPLY_ROUTE = `${ROUTE_PREFIX}/update/apply`
 
 /** 包名（profile 依赖名 = npm 名 = bundle 名）。 */
 export const PACKAGE_NAME = 'dsh-deepseek-balance-panel'
@@ -1204,6 +1208,133 @@ export async function checkUpdate(options = {}) {
   return value
 }
 
+/** 同一时刻只允许一次升级在跑。 */
+let updateApplying = false
+
+/**
+ * 读磁盘上实际装着的那一版。
+ * @param {(file: string) => string} [read] 读文件（测试可注入）。
+ * @returns {string | undefined} 版本号。
+ */
+export function installedVersionOnDisk(read = (file) => fs.readFileSync(file, 'utf8')) {
+  try {
+    const manifest = JSON.parse(read(path.join(profileDir(), 'node_modules', PACKAGE_NAME, 'package.json')))
+    return typeof manifest?.version === 'string' ? manifest.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 找一份能用的 pnpm。
+ *
+ * 优先用 DSH 自带的那个（`resources/runtime/primary-runtime/dependencies/pnpm`）：
+ * 它和 profile 里已有的 store 大版本一致（v11），用系统里的 pnpm 10 会因为 store 不匹配直接失败。
+ * @returns {{ command: string, args: string[], env: Record<string, string> }} 命令。
+ */
+function pnpmCommand() {
+  // 测试/排障用：显式指定 pnpm 的入口脚本。
+  const explicit = process.env.DSH_PNPM
+  if (typeof explicit === 'string' && explicit !== '' && fs.existsSync(explicit)) {
+    return { command: process.execPath, args: [explicit], env: {} }
+  }
+  /** 候选目录：Electron 的 resourcesPath，或者 exe 旁边的 resources。 */
+  const roots = []
+  if (typeof process.resourcesPath === 'string' && process.resourcesPath !== '') roots.push(process.resourcesPath)
+  roots.push(path.join(path.dirname(process.execPath), 'resources'))
+  for (const root of roots) {
+    const bundled = path.join(root, 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+    if (fs.existsSync(bundled)) {
+      // pnpm.mjs 就是个 ESM 脚本：用当前 node（打包后是 Electron，需要 ELECTRON_RUN_AS_NODE）跑它。
+      return { command: process.execPath, args: [bundled], env: { ELECTRON_RUN_AS_NODE: '1' } }
+    }
+  }
+  return { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', args: [], env: {} }
+}
+
+/**
+ * 执行升级：在 profile 里 `pnpm add <包>@<版本>`。
+ *
+ * 为什么不用 DSH 的 `pluginManager.installBundle()`：它对「已安装的同名包」直接
+ * 返回 `refused("already-installed")`（而且包在 `ok:true` 里），升级路径根本不走；
+ * 卸载又要求停掉 profile。所以照 `dsh plugin add` 的做法自己跑 pnpm。
+ *
+ * @param {{ version?: string, registry?: string, timeoutMs?: number }} [options] 选项。
+ * @returns {Promise<Record<string, unknown>>} 结果。
+ */
+export async function applyUpdate(options = {}) {
+  if (updateApplying) return { ok: false, reason: 'busy', message: 'another update is running' }
+  const { mode, spec } = installedSpec()
+  if (mode !== 'npm') {
+    return { ok: false, reason: 'not-npm', mode, spec, message: 'only npm installs can be updated from here' }
+  }
+
+  const target = options.version === undefined ? 'latest' : options.version
+  const registry = options.registry ?? 'https://registry.npmjs.org'
+  const before = installedVersionOnDisk()
+
+  updateApplying = true
+  try {
+    const { command, args, env } = pnpmCommand()
+    const child = spawn(
+      command,
+      [...args, 'add', `${PACKAGE_NAME}@${target}`, `--registry=${registry}`],
+      {
+        cwd: profileDir(),
+        env: { ...process.env, ...env, CI: 'true' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        // .cmd 在 Windows 上不能直接 spawn（EINVAL），只有退回系统 pnpm 时才需要 shell。
+        shell: command.endsWith('.cmd'),
+      },
+    )
+
+    let output = ''
+    child.stdout?.on('data', (chunk) => {
+      output += String(chunk)
+    })
+    child.stderr?.on('data', (chunk) => {
+      output += String(chunk)
+    })
+
+    const timeoutMs = options.timeoutMs ?? 180_000
+    const code = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill()
+        resolve('timeout')
+      }, timeoutMs)
+      child.on('error', (error) => {
+        clearTimeout(timer)
+        output += `\n${describe(error)}`
+        resolve(1)
+      })
+      child.on('exit', (exitCode) => {
+        clearTimeout(timer)
+        resolve(exitCode ?? 1)
+      })
+    })
+
+    const after = installedVersionOnDisk()
+    const tail = output.trim().split('\n').slice(-6).join('\n')
+    const changed = before !== after
+    // pnpm 说成功、版本却没变，同样算失败：不能让界面报「已更新」而磁盘没动。
+    const ok = code === 0 && changed && after === target
+    updateCache = undefined
+    return {
+      ok,
+      before,
+      installed: after,
+      target,
+      changed,
+      ...(ok ? {} : { reason: code === 'timeout' ? 'timeout' : 'failed', message: tail }),
+    }
+  } catch (error) {
+    return { ok: false, reason: 'failed', message: describe(error) }
+  } finally {
+    updateApplying = false
+  }
+}
+
 /**
  * 发一个 JSON 响应。
  * @param {import('node:http').ServerResponse} res 响应对象。
@@ -1345,6 +1476,33 @@ export function apply(ctx) {
             checkUpdate({ force: query.force === true })
               .then((value) => sendJson(res, 200, value))
               .catch((error) => sendJson(res, 200, { ok: false, note: 'check-failed', message: describe(error) }))
+          },
+        }),
+      )
+
+      disposers.push(
+        child.webServer.register({
+          kind: 'exact',
+          path: UPDATE_APPLY_ROUTE,
+          handler: (req, res) => {
+            const method = String(req.method ?? 'POST').toUpperCase()
+            if (method !== 'POST') {
+              sendJson(res, 405, { ok: false, reason: 'method', message: 'use POST' })
+              return
+            }
+            const query = readQuery(req)
+            checkUpdate({ force: true })
+              .then((value) => {
+                if (value.ok !== true || value.canUpdate !== true) {
+                  sendJson(res, 409, { ok: false, reason: 'not-updatable', ...value })
+                  return undefined
+                }
+                return applyUpdate({ version: String(value.latest) }).then((result) => {
+                  sendJson(res, result.ok === true ? 200 : 500, result)
+                })
+              })
+              .catch((error) => sendJson(res, 500, { ok: false, reason: 'failed', message: describe(error) }))
+            void query
           },
         }),
       )

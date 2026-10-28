@@ -78,15 +78,8 @@ assert.equal(registration.id, 'dsh-deepseek-balance-panel')
 
 const mod = registration.factory(requireStub)
 assert.equal(typeof mod.apply, 'function', 'client half must export apply')
-assert.deepEqual(mod.inject, [
-  'slots',
-  'locale',
-  'sidebarRightTabs',
-  'sidebarRight',
-  'remote',
-  'remote.pluginManager',
-])
-assert.ok(mod.inject.includes('remote.pluginManager'), 'the dotted remote service must be declared on its own')
+assert.deepEqual(mod.inject, ['slots', 'locale', 'sidebarRightTabs', 'sidebarRight'])
+assert.equal(mod.inject.includes('remote'), false, 'the update path no longer depends on the remote service')
 assert.equal(styles.length, 1, 'the factory must inject exactly one style tag')
 assert.ok(styles[0].textContent.includes('.dsb-pane'), 'style tag carries the panel css')
 
@@ -654,11 +647,19 @@ assert.ok(updateButton, 'the banner carries a button')
 assert.equal(updateButton.props.disabled, false, 'the button is clickable')
 assert.equal(typeof updateButton.props.onClick, 'function', 'the button is wired to the installer')
 
-// 点下去真的要调到 DSH 的安装管线（spec 就是宿主给的那条）。
+// 点下去要 POST 到宿主的 /update/apply（真正执行 pnpm 的是宿主）。
+const fetchCalls = []
+const originalFetch = globalThis.window.fetch
+globalThis.window.fetch = async (url, init) => {
+  fetchCalls.push({ url: String(url), method: init?.method ?? 'GET' })
+  return { ok: true, json: async () => ({ ok: true, installed: '1.8.0' }) }
+}
 await updateButton.props.onClick()
-process.stdout.write(`remote     : ${JSON.stringify(remoteCalls)}\n`)
-assert.deepEqual(remoteCalls[0], ['install', UPDATE_AVAILABLE.updateSpec], 'the button installs the new version')
-assert.equal(remoteCalls.length, 1, 'a successful install needs no remove fallback')
+globalThis.window.fetch = originalFetch
+process.stdout.write(`apply call : ${JSON.stringify(fetchCalls)}\n`)
+const applyCall = fetchCalls.find((call) => call.url.endsWith('/update/apply'))
+assert.ok(applyCall, 'the button calls the host update route')
+assert.equal(applyCall.method, 'POST', 'the update is a POST')
 
 // 没有新版本（或本地链接安装）时，整条不出现。
 const idleText = textOf(
