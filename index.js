@@ -28,7 +28,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.8.4'
+export const VERSION = '1.8.5'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -1166,6 +1166,8 @@ export async function checkUpdate(options = {}) {
     canUpdate: false,
     updateSpec: undefined,
     note: undefined,
+    // 这次检查的时间：客户端拿去做提示，方便判断「是不是很久没查了」。
+    checkedAt: now,
   }
 
   if (mode === 'link') {

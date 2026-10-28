@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepseek-balance-panel",
-  "version": "1.8.4",
+  "version": "1.8.5",
   "description": "DSH 插件：右侧栏常驻「余额明细」——DeepSeek 余额、赠送钱包，以及今日 token 消耗（本机 DSH 会话 + 平台全部 API Key，重叠时按平台口径只算一次）/ 命中 / 未命中 / 输出 / 消费金额 / API 请求次数。",
   "type": "module",
   "main": "index.js",
