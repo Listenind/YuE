@@ -598,4 +598,62 @@ assert.match(usageWithoutBalance, /25\.96M/)
 process.stdout.write(`title      : ${textOf(title.component({}))}\n`)
 assert.equal(textOf(title.component({})), 't:title')
 
+/* ------------------------------------------------------------ 插件自更新 -- */
+
+// update 是 Body 的第 5 个 useState；用 INITIAL 跳过前面几个。
+const UPDATE_AVAILABLE = {
+  ok: true,
+  package: 'dsh-deepseek-balance-panel',
+  current: '1.7.4',
+  latest: '1.8.0',
+  available: true,
+  canUpdate: true,
+  mode: 'npm',
+  updateSpec: 'dsh-deepseek-balance-panel@1.8.0',
+}
+
+const updateTree = renderTree({ status: 'ready', data: { ...wallet, usage: USAGE } }, [
+  INITIAL,
+  INITIAL,
+  INITIAL,
+  UPDATE_AVAILABLE,
+  false,
+])
+const updateText = textOf(updateTree)
+process.stdout.write(`update     : ${updateText}\n`)
+assert.match(updateText, /t:update\.available/, 'a new version shows the banner')
+assert.match(updateText, /t:update\.action/, 'the banner offers an update action')
+
+const updateBar = updateTree.children.find((node) => node?.props?.className === 'dsb-update')
+assert.ok(updateBar, 'the banner is the first thing in the pane')
+const updateButton = updateBar.children.find((node) => node?.props?.className === 'dsb-update-button')
+assert.ok(updateButton, 'the banner carries a button')
+assert.equal(updateButton.props.disabled, false, 'the button is clickable')
+assert.equal(typeof updateButton.props.onClick, 'function', 'the button is wired to the installer')
+
+// 没有新版本（或本地链接安装）时，整条不出现。
+const idleText = textOf(
+  renderTree({ status: 'ready', data: { ...wallet, usage: USAGE } }, [
+    INITIAL,
+    INITIAL,
+    INITIAL,
+    { available: false, canUpdate: false, mode: 'link', note: 'local-link' },
+    false,
+  ]),
+)
+assert.doesNotMatch(idleText, /t:update\.available/, 'no banner without a new version')
+assert.doesNotMatch(idleText, /t:update\.action/, 'no update button without a new version')
+
+// 正在更新时按钮禁用并显示「更新中…」。
+const applyingText = textOf(
+  renderTree({ status: 'ready', data: { ...wallet, usage: USAGE } }, [
+    INITIAL,
+    INITIAL,
+    INITIAL,
+    UPDATE_AVAILABLE,
+    true,
+  ]),
+)
+assert.match(applyingText, /t:update\.applying/, 'the button reports progress while installing')
+
 process.stdout.write('\nall client-half assertions passed\n')

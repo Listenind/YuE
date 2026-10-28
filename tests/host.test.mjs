@@ -62,7 +62,8 @@ const ctx = {
   },
 }
 
-const { apply, BALANCE_ROUTE, STATE_ROUTE, VERSION } = await import('../index.js')
+const { apply, BALANCE_ROUTE, STATE_ROUTE, UPDATE_ROUTE, VERSION, checkUpdate, compareVersions, installedSpec } =
+  await import('../index.js')
 apply(ctx)
 
 /** Invoke a route handler and wait until it writes a response. */
@@ -75,7 +76,11 @@ async function call(handler, req) {
   return res
 }
 
-assert.deepEqual([...routes.keys()].sort(), [BALANCE_ROUTE, STATE_ROUTE].sort(), 'both routes are registered')
+assert.deepEqual(
+  [...routes.keys()].sort(),
+  [BALANCE_ROUTE, STATE_ROUTE, UPDATE_ROUTE].sort(),
+  'balance, state and update routes are registered',
+)
 
 const handler = routes.get(BALANCE_ROUTE).handler
 const res = await call(handler, { method: 'GET', url: `${BALANCE_ROUTE}?locale=zh-CN&tz=-480&force=1` })
@@ -231,5 +236,90 @@ assert.equal(
 // 本机各来源加起来必须等于本机总量（不能凭空多出来或漏掉）。
 const sourceTotal = usage.local.sources.reduce((sum, entry) => sum + entry.totalTokens, 0)
 assert.equal(sourceTotal, usage.local.totalTokens, 'per-source groups add up to the local total')
+
+/* ------------------------------------------------------------------ 更新 -- */
+
+process.stdout.write('\n-- update --\n')
+
+// 版本比较：主次修订、预发布。
+assert.ok(compareVersions('1.8.0', '1.7.4') > 0, 'a newer minor wins')
+assert.equal(compareVersions('1.7.4', '1.7.4'), 0, 'equal versions compare equal')
+assert.ok(compareVersions('1.7.4-rc.1', '1.7.4') < 0, 'a prerelease is older than its release')
+assert.ok(compareVersions('1.7.10', '1.7.9') > 0, 'numeric comparison, not string')
+
+/** 造一个只含本包依赖的 profile package.json。 */
+const manifestOf = (spec) => JSON.stringify({ dependencies: { 'dsh-deepseek-balance-panel': spec } })
+
+assert.equal(installedSpec(() => manifestOf('^1.7.0')).mode, 'npm', 'a semver range means npm')
+assert.equal(installedSpec(() => manifestOf('github:Listenind/YuE#main')).mode, 'git', 'a GitHub spec means git')
+assert.equal(installedSpec(() => manifestOf('file:plugins/dsh-deepseek-balance-panel')).mode, 'link', 'a local path means link')
+assert.equal(installedSpec(() => manifestOf('https://example.com/x.tgz')).mode, 'npm', 'a tarball URL falls back to npm')
+assert.equal(installedSpec(() => '{}').mode, 'unknown', 'not installed')
+
+/** 一个假的 registry 响应。 */
+const registryFetch = (version) => async () => ({ ok: true, json: async () => ({ version }) })
+
+// 造一个「一定比当前新」的版本号，避免每次发版都要改这里的字面量。
+const NEWER = (() => {
+  const [major = 0, minor = 0] = VERSION.split('.').map(Number)
+  return `${major}.${minor + 1}.0`
+})()
+
+const npmCheck = await checkUpdate({
+  read: () => manifestOf('^1.7.0'),
+  fetchImpl: registryFetch(NEWER),
+  force: true,
+})
+process.stdout.write(`${JSON.stringify(npmCheck)}\n`)
+assert.equal(npmCheck.mode, 'npm')
+assert.equal(npmCheck.current, VERSION)
+assert.equal(npmCheck.latest, NEWER)
+assert.equal(npmCheck.available, true, 'a newer npm version is reported')
+assert.equal(npmCheck.updateSpec, `dsh-deepseek-balance-panel@${NEWER}`, 'the update spec pins the new version')
+
+const sameCheck = await checkUpdate({
+  read: () => manifestOf('^1.7.0'),
+  fetchImpl: registryFetch(VERSION),
+  force: true,
+})
+assert.equal(sameCheck.available, false, 'the current version is not an update')
+
+// 本地链接安装（开发者工作区）不提供更新按钮。
+const linkCheck = await checkUpdate({ read: () => manifestOf('file:plugins/x'), force: true })
+assert.equal(linkCheck.mode, 'link')
+assert.equal(linkCheck.canUpdate, false, 'a linked dev copy is not updatable')
+assert.equal(linkCheck.note, 'local-link')
+
+// git 安装：去 GitHub 上的 package.json 取版本，updateSpec 原样回传。
+const gitCheck = await checkUpdate({
+  read: () => manifestOf('github:Listenind/YuE#main'),
+  fetchImpl: async (url) => {
+    assert.match(url, /raw\.githubusercontent\.com\/Listenind\/YuE\/main\/package\.json$/)
+    return { ok: true, json: async () => ({ version: `${NEWER}` }) }
+  },
+  force: true,
+})
+assert.equal(gitCheck.mode, 'git')
+assert.equal(gitCheck.latest, NEWER)
+assert.equal(gitCheck.updateSpec, 'github:Listenind/YuE#main', 'git installs re-install the same spec')
+
+// registry 不可达时不能把面板搞崩，只报告检查失败。
+const failedCheck = await checkUpdate({
+  read: () => manifestOf('^1.7.0'),
+  fetchImpl: async () => {
+    throw new Error('offline')
+  },
+  force: true,
+})
+assert.equal(failedCheck.ok, false)
+assert.equal(failedCheck.note, 'check-failed')
+
+// 路由本身也要挂上（GET 才允许）。
+const updateRoute = routes.get(UPDATE_ROUTE)
+assert.ok(updateRoute, `${UPDATE_ROUTE} must be registered`)
+const updateReply = await call(updateRoute.handler, { method: 'GET', url: UPDATE_ROUTE })
+const updateBody = JSON.parse(updateReply.body)
+assert.ok([true, false].includes(updateBody.ok), 'the update route answers with a status')
+assert.equal(updateBody.current, VERSION, 'the update route reports the running version')
 
 process.stdout.write('\nall host assertions passed\n')

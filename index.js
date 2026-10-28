@@ -28,7 +28,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.7.4'
+export const VERSION = '1.8.0'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -38,6 +38,18 @@ export const BALANCE_ROUTE = `${ROUTE_PREFIX}/balance`
 
 /** 自检：确认插件已装载、账号服务是否可见、用量目录是否可读。 */
 export const STATE_ROUTE = `${ROUTE_PREFIX}/state`
+
+/** 更新检查：当前版本、最新版本、能不能一键更新。 */
+export const UPDATE_ROUTE = `${ROUTE_PREFIX}/update`
+
+/** 包名（profile 依赖名 = npm 名 = bundle 名）。 */
+export const PACKAGE_NAME = 'dsh-deepseek-balance-panel'
+
+/** 更新检查的缓存窗口：别每 30 秒都去问一次 registry。 */
+const UPDATE_CACHE_TTL_MS = 10 * 60 * 1000
+
+/** 查版本时的外部超时。 */
+const UPDATE_TIMEOUT_MS = 8_000
 
 /** 余额缓存窗口。 */
 const BALANCE_CACHE_TTL_MS = 15_000
@@ -1022,6 +1034,174 @@ async function cachedUsage(ctx, query) {
   return value
 }
 
+/* -------------------------------------------------------------------- 更新 -- */
+/*
+ * 目标：作者发一个新版本 → 装了本插件的用户能在面板里看到「有新版本」，点一下就更新。
+ *
+ * 分成两半：
+ *   ① 宿主负责「查」：读 profile 里本包的依赖声明，判断用户是怎么装的（npm / git / 本地链接），
+ *      再去对应的地方问最新版本 —— npm registry 或 GitHub 上的 package.json。
+ *   ② 客户端负责「装」：调 DSH 自己的 `pluginManager.installBundle()`，也就是「添加插件」
+ *      那条安装管线（pnpm、锁、构建脚本审批都由它处理），不自己 spawn 命令。
+ *
+ * 本地链接安装（file:plugins/…）不提供更新：那是开发者自己的工作区副本，更新它没有意义。
+ */
+
+/** profile 目录。 */
+function profileDir() {
+  if (process.env.DSH_PROFILE_DIR) return path.resolve(process.env.DSH_PROFILE_DIR)
+  return path.join(DSH_HOME, 'profiles', 'desktop')
+}
+
+/**
+ * 读 profile 里本包的依赖声明，判断安装方式。
+ * @param {(file: string) => string} [read] 读文件（测试可注入）。
+ * @returns {{ spec: string | undefined, mode: 'npm' | 'git' | 'link' | 'unknown' }} 安装方式。
+ */
+export function installedSpec(read = (file) => fs.readFileSync(file, 'utf8')) {
+  let manifest
+  try {
+    manifest = JSON.parse(read(path.join(profileDir(), 'package.json')))
+  } catch {
+    return { spec: undefined, mode: 'unknown' }
+  }
+  const spec = manifest?.dependencies?.[PACKAGE_NAME] ?? manifest?.devDependencies?.[PACKAGE_NAME]
+  if (typeof spec !== 'string' || spec === '') return { spec: undefined, mode: 'unknown' }
+
+  // 本地目录（develop 时就地改）：file: / link: / 绝对路径 / 相对路径。
+  if (/^(file|link):/.test(spec) || /^[./\\]/.test(spec) || /^[a-zA-Z]:[\\/]/.test(spec)) {
+    return { spec, mode: 'link' }
+  }
+  // git / GitHub 直装。
+  if (/^(github:|git\+|git:|https?:\/\/.+\.git|git@)/.test(spec)) return { spec, mode: 'git' }
+  return { spec, mode: 'npm' }
+}
+
+/**
+ * 比较两个 semver（只认 x.y.z，预发布后缀按字符串比）。
+ * @param {string} left 版本。
+ * @param {string} right 版本。
+ * @returns {number} left 比 right 新则为正，相等为 0。
+ */
+export function compareVersions(left, right) {
+  const parse = (value) => {
+    const match = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+](.*))?$/.exec(String(value).trim())
+    if (match === null) return undefined
+    return {
+      parts: [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)],
+      pre: match[4] ?? '',
+    }
+  }
+  const a = parse(left)
+  const b = parse(right)
+  if (a === undefined || b === undefined) return 0
+  for (let index = 0; index < 3; index += 1) {
+    if (a.parts[index] !== b.parts[index]) return a.parts[index] - b.parts[index]
+  }
+  // 同一版号时：正式版 > 预发布版。
+  if (a.pre === b.pre) return 0
+  if (a.pre === '') return 1
+  if (b.pre === '') return -1
+  return a.pre > b.pre ? 1 : -1
+}
+
+/**
+ * 从 git spec 里挑出 GitHub 的 owner/repo 和 ref。
+ * @param {string} spec 依赖声明。
+ * @returns {{ repo: string, ref: string } | undefined} 仓库与分支。
+ */
+function githubTarget(spec) {
+  const cleaned = spec.replace(/^(github:|git\+)/, '')
+  const match = /^(?:github\.com[/:])?([^/#]+)\/([^/#]+?)(?:\.git)?(?:#(.+))?$/.exec(cleaned)
+  if (match === null) return undefined
+  return { repo: `${match[1]}/${match[2]}`, ref: match[3] ?? 'HEAD' }
+}
+
+/**
+ * 带超时的 JSON GET。
+ * @param {typeof fetch} fetchImpl fetch 实现。
+ * @param {string} url 地址。
+ * @returns {Promise<any>} 解析后的 JSON。
+ */
+async function fetchJson(fetchImpl, url) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), UPDATE_TIMEOUT_MS)
+  try {
+    const response = await fetchImpl(url, {
+      signal: controller.signal,
+      headers: { accept: 'application/json', 'user-agent': `${PACKAGE_NAME}/${VERSION}` },
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    return await response.json()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** 更新检查缓存。 */
+let updateCache
+
+/**
+ * 检查有没有新版本。
+ * @param {{ fetchImpl?: typeof fetch, read?: (file: string) => string, now?: number, force?: boolean }} [options] 选项。
+ * @returns {Promise<Record<string, unknown>>} 检查结果。
+ */
+export async function checkUpdate(options = {}) {
+  const now = options.now ?? Date.now()
+  const { spec, mode } = installedSpec(options.read)
+  const cacheKey = `${spec}:${mode}`
+  if (options.force !== true && updateCache !== undefined && updateCache.key === cacheKey && now - updateCache.at < UPDATE_CACHE_TTL_MS) {
+    return updateCache.value
+  }
+
+  /** @type {Record<string, unknown>} */
+  const value = {
+    ok: true,
+    package: PACKAGE_NAME,
+    current: VERSION,
+    latest: VERSION,
+    available: false,
+    mode,
+    spec,
+    canUpdate: false,
+    updateSpec: undefined,
+    note: undefined,
+  }
+
+  if (mode === 'link') {
+    value.note = 'local-link'
+  } else if (mode === 'unknown') {
+    value.note = 'not-installed'
+  } else {
+    const fetchImpl = options.fetchImpl ?? fetch
+    try {
+      if (mode === 'git') {
+        const target = githubTarget(spec ?? '')
+        if (target === undefined) throw new Error('unsupported git spec')
+        const manifest = await fetchJson(
+          fetchImpl,
+          `https://raw.githubusercontent.com/${target.repo}/${target.ref === 'HEAD' ? 'HEAD' : encodeURIComponent(target.ref)}/package.json`,
+        )
+        value.latest = typeof manifest?.version === 'string' ? manifest.version : VERSION
+        value.updateSpec = spec
+      } else {
+        const manifest = await fetchJson(fetchImpl, `https://registry.npmjs.org/${PACKAGE_NAME}/latest`)
+        value.latest = typeof manifest?.version === 'string' ? manifest.version : VERSION
+        value.updateSpec = `${PACKAGE_NAME}@${value.latest}`
+      }
+      value.available = compareVersions(String(value.latest), VERSION) > 0
+      value.canUpdate = true
+    } catch (error) {
+      value.ok = false
+      value.note = 'check-failed'
+      value.message = describe(error)
+    }
+  }
+
+  updateCache = { key: cacheKey, at: now, value }
+  return value
+}
+
 /**
  * 发一个 JSON 响应。
  * @param {import('node:http').ServerResponse} res 响应对象。
@@ -1144,6 +1324,24 @@ export function apply(ctx) {
                 reply.platformSession = 'error'
               })
               .finally(() => sendJson(res, 200, reply))
+          },
+        }),
+      )
+
+      disposers.push(
+        child.webServer.register({
+          kind: 'exact',
+          path: UPDATE_ROUTE,
+          handler: (req, res) => {
+            const method = String(req.method ?? 'GET').toUpperCase()
+            if (method !== 'GET' && method !== 'HEAD') {
+              sendJson(res, 405, { ok: false, reason: 'method', message: 'use GET' })
+              return
+            }
+            const query = readQuery(req)
+            checkUpdate({ force: query.force === true })
+              .then((value) => sendJson(res, 200, value))
+              .catch((error) => sendJson(res, 200, { ok: false, note: 'check-failed', message: describe(error) }))
           },
         }),
       )

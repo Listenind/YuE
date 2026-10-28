@@ -164,6 +164,25 @@ npm test
 
 卸载：从 `dsh.profile.bundles` 与 `dependencies` 里去掉该名字，删掉 `plugins/` 与 `node_modules/` 下的目录，刷新页面。
 
+## 更新
+
+作者发了新版本之后，装了本插件的人不用重新输命令：
+
+1. 打开面板时（此后每 6 小时一次）会问一次宿主有没有新版本；
+2. 有的话顶部出现一条 **「新版本 1.8.0 · 更新」**；
+3. 点「更新」→ 走 DSH 自己的 `pluginManager.installBundle()`（和「设置 → 插件 → 添加插件」同一条安装管线），成功后提示 **「插件已更新，重启 DSH 生效」**；
+4. 重启 DSH（托盘右键 → 重启）完成。
+
+几个实现细节：
+
+- **怎么知道去哪查**：宿主读 `~/.dsh/profiles/desktop/package.json` 里本包的依赖声明。
+  - `^1.7.0` 这类语义化版本 → 查 npm registry 的 `latest`，更新 spec 是 `dsh-deepseek-balance-panel@<新版本>`；
+  - `github:owner/repo#ref` → 查 GitHub 上该 ref 的 `package.json`，更新 spec 原样重装；
+  - `file:plugins/…`（开发时的本地链接）→ **不提示更新**，那本来就是作者的工作区副本。
+- **为什么不自己跑 pnpm**：DSH 的插件安装有锁、pnpm 解析、构建脚本审批、版本兼容检查，自己 spawn 一条命令很容易绕开这些，所以更新动作交给它。
+- **失败怎么办**：检查失败只在日志里写，不打扰面板；更新失败会在页脚闪一句「插件更新失败」，并保留按钮可以重试。
+- 检查结果在宿主缓存 10 分钟（避免每 30 秒轮询都打 registry）。
+
 ## 结构
 
 | 文件 | 作用 |
