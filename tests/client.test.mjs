@@ -678,6 +678,20 @@ const applyingText = textOf(
 )
 assert.match(applyingText, /t:update\.applying/, 'the button reports progress while installing')
 
+// 装完之后：条还在，但变成「已安装 x，重启生效」，按钮消失。
+const appliedText = textOf(
+  renderTree({ status: 'ready', data: { ...wallet, usage: USAGE } }, [
+    INITIAL,
+    INITIAL,
+    INITIAL,
+    { ...UPDATE_AVAILABLE, available: false, applied: true },
+    false,
+  ]),
+)
+process.stdout.write(`applied    : ${appliedText.slice(0, 60)}\n`)
+assert.match(appliedText, /t:update\.done/, 'a finished install asks for a restart')
+assert.doesNotMatch(appliedText, /t:update\.action/, 'the button is gone once installed')
+
 // 页脚显示当前版本，更新前后一眼能看出来。
 const versionText = textOf(
   renderTree({ status: 'ready', data: { ...wallet, usage: USAGE, version: '1.8.1' } }),
