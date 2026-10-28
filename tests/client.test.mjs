@@ -78,7 +78,8 @@ assert.equal(registration.id, 'dsh-deepseek-balance-panel')
 
 const mod = registration.factory(requireStub)
 assert.equal(typeof mod.apply, 'function', 'client half must export apply')
-assert.deepEqual(mod.inject, ['slots', 'locale', 'sidebarRightTabs', 'sidebarRight'])
+assert.deepEqual(mod.inject, ['slots', 'locale', 'sidebarRightTabs', 'sidebarRight', 'remote'])
+assert.ok(mod.inject.includes('remote'), 'the remote service is declared: the update button needs it')
 assert.equal(styles.length, 1, 'the factory must inject exactly one style tag')
 assert.ok(styles[0].textContent.includes('.dsb-pane'), 'style tag carries the panel css')
 
@@ -97,6 +98,8 @@ globalThis.document.querySelector = () => null
 const tabDefinitions = []
 const slotRegistrations = new Map()
 const dictionary = { active: 'zh-CN' }
+/** 更新流程里对 remote.pluginManager 的调用记录。 */
+const remoteCalls = []
 
 const ctx = {
   effect: (fn) => {
@@ -129,6 +132,19 @@ const ctx = {
   sidebarRight: {
     openTab: () => {
       throw new Error('no session surface is mounted')
+    },
+  },
+  // 更新按钮要用的远程命名空间：记录被调用的 spec，安装结果假装成功。
+  remote: {
+    pluginManager: {
+      installBundle: async (spec) => {
+        remoteCalls.push(['install', spec])
+        return { ok: true }
+      },
+      removeBundle: async (name) => {
+        remoteCalls.push(['remove', name])
+        return { ok: true }
+      },
     },
   },
 }
@@ -630,6 +646,12 @@ const updateButton = updateBar.children.find((node) => node?.props?.className ==
 assert.ok(updateButton, 'the banner carries a button')
 assert.equal(updateButton.props.disabled, false, 'the button is clickable')
 assert.equal(typeof updateButton.props.onClick, 'function', 'the button is wired to the installer')
+
+// 点下去真的要调到 DSH 的安装管线（spec 就是宿主给的那条）。
+await updateButton.props.onClick()
+process.stdout.write(`remote     : ${JSON.stringify(remoteCalls)}\n`)
+assert.deepEqual(remoteCalls[0], ['install', UPDATE_AVAILABLE.updateSpec], 'the button installs the new version')
+assert.equal(remoteCalls.length, 1, 'a successful install needs no remove fallback')
 
 // 没有新版本（或本地链接安装）时，整条不出现。
 const idleText = textOf(
