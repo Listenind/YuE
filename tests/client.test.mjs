@@ -78,8 +78,15 @@ assert.equal(registration.id, 'dsh-deepseek-balance-panel')
 
 const mod = registration.factory(requireStub)
 assert.equal(typeof mod.apply, 'function', 'client half must export apply')
-assert.deepEqual(mod.inject, ['slots', 'locale', 'sidebarRightTabs', 'sidebarRight', 'remote'])
-assert.ok(mod.inject.includes('remote'), 'the remote service is declared: the update button needs it')
+assert.deepEqual(mod.inject, [
+  'slots',
+  'locale',
+  'sidebarRightTabs',
+  'sidebarRight',
+  'remote',
+  'remote.pluginManager',
+])
+assert.ok(mod.inject.includes('remote.pluginManager'), 'the dotted remote service must be declared on its own')
 assert.equal(styles.length, 1, 'the factory must inject exactly one style tag')
 assert.ok(styles[0].textContent.includes('.dsb-pane'), 'style tag carries the panel css')
 
