@@ -248,6 +248,23 @@ assert.equal(
 const sourceTotal = usage.local.sources.reduce((sum, entry) => sum + entry.totalTokens, 0)
 assert.equal(sourceTotal, usage.local.totalTokens, 'per-source groups add up to the local total')
 
+// 每个会话的用量：按 token 降序，总和不超过本机总量（跨天会话会被基线截断，只会更少）。
+assert.ok(Array.isArray(usage.local.sessions), 'the local block carries per-session rows')
+const sessionTokens = usage.local.sessions.reduce((sum, row) => sum + (Number(row.tokens) || 0), 0)
+assert.ok(sessionTokens > 0, 'at least one session used tokens today')
+assert.ok(
+  sessionTokens <= usage.local.totalTokens,
+  `per-session tokens (${sessionTokens}) must not exceed the local total (${usage.local.totalTokens})`,
+)
+assert.ok(
+  usage.local.sessions.every((row, index, all) => index === 0 || all[index - 1].tokens >= row.tokens),
+  'per-session rows are sorted by tokens descending',
+)
+assert.ok(
+  usage.local.sessions.every((row) => typeof row.requests === 'number' && typeof row.cost === 'number'),
+  'every session row carries requests and cost',
+)
+
 /* ------------------------------------------------------------------ 更新 -- */
 
 process.stdout.write('\n-- update --\n')

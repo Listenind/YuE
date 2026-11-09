@@ -386,6 +386,12 @@ const MERGED = {
       { source: 'cordis', totalTokens: 20_000_000, requests: 120, cost: 0.9 },
       { source: 'qq-fish', totalTokens: 5_960_000, requests: 48, cost: 0.28 },
     ],
+    // 每个会话的用量：有标题的显示标题，没标题的回落到 preset + 短 id。
+    sessions: [
+      { id: 'session-11112222', title: '支付宝账单 UIA 调用', preset: 'cordis', tokens: 18_000_000, requests: 100, cost: 0.8 },
+      { id: 'session-33334444', title: '剧本大纲润色', preset: 'cordis', tokens: 5_000_000, requests: 40, cost: 0.2 },
+      { id: 'session-55556666', preset: 'qq-fish', tokens: 960_000, requests: 10, cost: 0.05 },
+    ],
   },
   platform: {
     available: true,
@@ -423,6 +429,21 @@ assert.match(sourceText, /CC SWITCH\s+3M\s+¥1\.2/i, 'platform keys are ranked b
 const rows = sourceCard.children.slice(1).map((row) => textOf(row))
 assert.equal(rows[0].includes('cordis'), true, 'the biggest source comes first')
 assert.equal(rows.length, 4, 'every non-zero source gets a row')
+
+// 第四张卡片：每个会话各自的用量（标题 + token + 金额），按 token 降序。
+const sessionCard = mergedTree.children[usageIndex].children.find(
+  (node) => node?.props?.className === 'dsb-card dsb-sessions',
+)
+assert.ok(sessionCard, 'the per-session card is rendered')
+const sessionText = textOf(sessionCard)
+process.stdout.write(`sessions   : ${sessionText}\n`)
+assert.match(sessionText, /t:sessions\.title/)
+assert.match(sessionText, /支付宝账单 UIA 调用\s+18M\s+¥0\.80/, 'a titled session shows its title, tokens and cost')
+assert.match(sessionText, /剧本大纲润色\s+5M\s+¥0\.20/, 'the second session follows')
+assert.match(sessionText, /qq-fish 55556666/, 'an untitled session falls back to preset + short id')
+const sessionRows = sessionCard.children.slice(1).map((row) => textOf(row))
+assert.equal(sessionRows[0].includes('支付宝账单'), true, 'the heaviest session is first')
+
 
 // 重叠口径：DSH 自己就用这把 Key 时，本机只是平台的一个子集，总计按平台算一次。
 const overlapText = textOf(

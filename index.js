@@ -29,7 +29,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.8.7'
+export const VERSION = '1.8.8'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -277,6 +277,9 @@ function readRecord(record) {
   const steps = record?.rows?.sessionStats?.val?.steps
   const model = record?.rows?.modelSelection?.val?.lastUsed?.model
   const preset = record?.rows?.agentPreset?.val
+  // 会话标题：投影里 `title` 这一行的值可能是字符串，也可能是 `{title}`。
+  const titleRow = record?.rows?.title?.val
+  const rawTitle = typeof titleRow === 'string' ? titleRow : titleRow?.title
   return {
     tokens: {
       cacheRead: count(totals.cacheReadTokens),
@@ -285,6 +288,7 @@ function readRecord(record) {
       requests: count(steps),
     },
     preset: typeof preset === 'string' ? preset : undefined,
+    title: typeof rawTitle === 'string' && rawTitle.trim() !== '' ? rawTitle.trim().slice(0, 120) : undefined,
     createdAt: typeof record?.identity?.createdAt === 'number' ? record.identity.createdAt : undefined,
     model: typeof model === 'string' ? model : undefined,
   }
@@ -316,6 +320,9 @@ export function aggregateUsage(now = Date.now()) {
 
   // 按「来源」（agentPreset）分一份账，给面板做通用细分。
   const sources = createSourceTally()
+
+  /** @type {{ id: string, title?: string, preset?: string, tokens: number, requests: number, cost: number }[]} */
+  const perSession = []
 
   let names = []
   try {
@@ -407,6 +414,19 @@ export function aggregateUsage(now = Date.now()) {
     state.sessions += 1
 
     sources.add(parsed.preset ?? NO_SOURCE_LABEL, delta, cost)
+
+    // 每个会话单独记一笔：面板要能列出「今天哪个会话最费 token」。
+    const sessionTokens = delta.cacheRead + delta.uncached + delta.output
+    if (sessionTokens > 0 || delta.requests > 0) {
+      perSession.push({
+        id,
+        title: parsed.title,
+        preset: parsed.preset,
+        tokens: sessionTokens,
+        requests: delta.requests,
+        cost: Math.round(cost * 10000) / 10000,
+      })
+    }
   }
 
   // 清理账本里已经消失的会话（被删档），避免文件无限增长。
@@ -434,6 +454,8 @@ export function aggregateUsage(now = Date.now()) {
     partial: state.partial,
     ledger: ledgerWritable ? 'ok' : 'read-only',
     sources: sources.list(),
+    // 按今天的 token 从多到少；最多 30 条，避免面板 payload 无限长。
+    sessionRows: perSession.sort((a, b) => b.tokens - a.tokens).slice(0, 30),
   }
 }
 
@@ -979,6 +1001,8 @@ function mergeUsage(local, platform, now) {
       available: local.available === true,
       // 按 agentPreset 的来源细分（机器人 / GUI / 小号脚本……都只是不同的 preset）。
       sources,
+      // 每个会话今天用了多少（按 token 降序，最多 30 条）。
+      sessions: Array.isArray(local.sessionRows) ? local.sessionRows : [],
     },
     platform: merged
       ? {
