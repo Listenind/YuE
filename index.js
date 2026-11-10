@@ -29,7 +29,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.8.9'
+export const VERSION = '1.8.10'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -1219,7 +1219,12 @@ export async function checkUpdate(options = {}) {
         value.latest = typeof manifest?.version === 'string' ? manifest.version : VERSION
         value.updateSpec = `${PACKAGE_NAME}@${value.latest}`
       }
-      value.available = compareVersions(String(value.latest), VERSION) > 0
+      // 比较基准是**磁盘上装着的版本**，不是内存里跑着的版本：
+      // 装完还没重启时，磁盘已经是新版，这时不该再提示「有新版本」。
+      const installed = installedVersionOnDisk(options.read) ?? VERSION
+      value.installed = installed
+      value.needsRestart = installed !== VERSION
+      value.available = compareVersions(String(value.latest), installed) > 0
       value.canUpdate = true
     } catch (error) {
       value.ok = false
@@ -1341,8 +1346,10 @@ export async function applyUpdate(options = {}) {
     const after = installedVersionOnDisk()
     const tail = output.trim().split('\n').slice(-6).join('\n')
     const changed = before !== after
-    // pnpm 说成功、版本却没变，同样算失败：不能让界面报「已更新」而磁盘没动。
-    const ok = code === 0 && changed && after === target
+    // 只要最终版本等于目标就算成功：
+    //   - 已经装过同一版（重复点击）时 pnpm 会打印 "Already up to date"，那是幂等成功，不是失败；
+    //   - 版本没到目标才是失败（pnpm 说成功也不行）。
+    const ok = code === 0 && after === target
     updateCache = undefined
     return {
       ok,

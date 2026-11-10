@@ -304,6 +304,8 @@ assert.equal(npmCheck.current, VERSION)
 assert.equal(npmCheck.latest, NEWER)
 assert.equal(npmCheck.available, true, 'a newer npm version is reported')
 assert.equal(npmCheck.updateSpec, `dsh-deepseek-balance-panel@${NEWER}`, 'the update spec pins the new version')
+assert.equal(typeof npmCheck.installed, 'string', 'the check reports what is actually on disk')
+assert.equal(typeof npmCheck.needsRestart, 'boolean', 'the check says whether a restart is pending')
 
 const sameCheck = await checkUpdate({
   read: () => manifestOf('^1.7.0'),
