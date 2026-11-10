@@ -18,7 +18,7 @@
 ┌────────────────────────────────────────────┐
 │ ▣ 余额明细 │ 文件 │                        │
 ├────────────────────────────────────────────┤
-│ 新版本 1.8.13                     〔更新〕 │
+│ 新版本 1.8.14                     〔更新〕 │
 │ ● 账户余额                            刷新 │
 │ ┌────────────────────────────────────────┐ │
 │ │ ¥13.75                                 │ │
@@ -57,7 +57,7 @@
 │ │ 你要为《文气通天》…        5.54M ¥0.96 │ │
 │ │ …（全部列出，不折叠）                  │ │
 │ └────────────────────────────────────────┘ │
-│ 更新于 11:39:59 · v1.8.13                  │
+│ 更新于 11:39:59 · v1.8.14                  │
 └────────────────────────────────────────────┘
 ```
 
@@ -112,6 +112,8 @@
 
 只画今天真正有消耗的来源，最多 6 条，按 token 从多到少排；每条右侧带今天的金额（本机是估算，平台是按 Key 的实扣）。鼠标悬停一条会给出「本机/平台 · 名字 · 精确 token 数 · 金额」。来源加起来等于卡片顶部那个总数，不会重复计算。会话级别的完整清单在下一张「会话用量」里。
 
+> 这里也会**去重**：判定本机与平台重叠时，平台侧跳过「本机正在用的那把 Key」（`keys[].own`），只保留其它 Key，卡片底部注明「平台那把 Key 就是本机 DSH 的流量，已合并为一行」。否则同一批请求会在 `cordis` 与 `Deep Seek Hansen` 里各出现一次，看起来像翻倍。
+
 > 名字来自 DSH 自己的标识：`agentPreset` id 与 Platform 的 Key 名称。想让机器人那行更好认，就把 `dsh-qq-bot` 的 `agentPreset` 起一个明白的名字；想让小号那行更好认，就在 Platform 里给那把 Key 改个名。
 
 ### 两条口径各自的口径与误差
@@ -146,7 +148,7 @@
 几个实现细节：
 
 - **怎么知道去哪查**：宿主读 `~/.dsh/profiles/desktop/package.json` 里本包的依赖声明。
-  - 语义化版本（`^1.8.0` / `1.8.13`）→ 查 npm registry 的 `latest`；
+  - 语义化版本（`^1.8.0` / `1.8.14`）→ 查 npm registry 的 `latest`；
   - `github:owner/repo#ref` → 查 GitHub 上该 ref 的 `package.json`；
   - `file:plugins/…`（开发时的本地链接）→ **不提示更新**，那是作者的工作区副本。
 - **不用 DSH 的 `pluginManager.installBundle()`**：它对「已安装的同名包」直接返回 `{ok:true, value:{status:"refused", problem:"already-installed"}}`，而 `removeBundle` 又要求先停掉 profile —— 它设计上是「装新插件」，不是「升级已装」。所以更新走宿主自己的 pnpm，等价于手工 `dsh plugin add`。
@@ -196,10 +198,10 @@ DSH 会监听 profile 的 `package.json`，第一次装上一个**新名字**的
 
 ```bash
 curl http://127.0.0.1:<port>/dsh-deepseek-balance-panel/state
-# {"ok":true,"plugin":"deepseek-balance-panel","version":"1.8.13","accountService":"mounted",...}
+# {"ok":true,"plugin":"deepseek-balance-panel","version":"1.8.14","accountService":"mounted",...}
 curl 'http://127.0.0.1:<port>/dsh-deepseek-balance-panel/balance'
 curl 'http://127.0.0.1:<port>/dsh-deepseek-balance-panel/update?force=1'
-# {"ok":true,"current":"1.8.13","installed":"1.8.13","latest":"1.8.13","mode":"npm","available":false}
+# {"ok":true,"current":"1.8.14","installed":"1.8.14","latest":"1.8.14","mode":"npm","available":false}
 ```
 
 运行测试（Node 22+，不需要安装依赖）：
@@ -238,7 +240,7 @@ npm test
   "fetchedAt": 1792206138981,
   "links": { "topUpUrl": "…", "usageUrl": "…" },
   // 今日用量部分（与余额互相独立）
-  "version": "1.8.13",
+  "version": "1.8.14",
   "usage": {
     "day": "2026-11-10", "available": true, "overlap": true,
     "totalTokens": 148000000, "cacheReadTokens": 146900000,

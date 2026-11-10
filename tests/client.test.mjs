@@ -492,6 +492,36 @@ assert.match(overlapText, /t:usage\.cost ≈¥1\.89/, 'cost is the platform spen
 assert.match(overlapText, /t:usage\.dedupNote/, 'the de-duplication is explained')
 assert.doesNotMatch(overlapText, /t:usage\.mergedNote/, 'no addition note when the totals overlap')
 
+// 重叠时来源图也不能把同一批请求画两遍：平台侧「自己那把 Key」整行跳过。
+const overlapTree = renderTree({
+  status: 'ready',
+  data: {
+    ...wallet,
+    usage: {
+      ...MERGED,
+      overlap: true,
+      local: { ...MERGED.local, totalTokens: 4_000_000, requests: 130 },
+      platform: {
+        ...MERGED.platform,
+        today: { tokens: 4_040_000, hit: 2_335_488, miss: 1_332_284, output: 374_579, requests: 132, cost: 1.89 },
+        keys: [
+          { name: 'CC SWITCH', todayTokens: 3_000_000, todayCost: 1.2, tokens: 9_000_000, own: false },
+          { name: 'Deep Seek Hansen', todayTokens: 1_040_000, todayCost: 0.69, tokens: 4_000_000, own: true },
+        ],
+      },
+    },
+  },
+})
+const overlapSourceCard = overlapTree.children[usageIndex].children.find(
+  (node) => node?.props?.className === 'dsb-card dsb-sources',
+)
+const overlapSourceText = textOf(overlapSourceCard)
+process.stdout.write(`overlapSrc : ${overlapSourceText}\n`)
+assert.doesNotMatch(overlapSourceText, /Deep Seek Hansen/, 'the machine’s own key is not listed twice in the source chart')
+assert.match(overlapSourceText, /CC SWITCH/, 'other keys still show up')
+assert.match(overlapSourceText, /t:sources\.merged/, 'the merge is explained')
+
+
 // 旧宿主（没有 overlap 字段）时客户端要能自己看出来：本机 4M vs 平台 4.04M → 同一批请求。
 const inferredText = textOf(
   renderTree({
