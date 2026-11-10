@@ -444,6 +444,28 @@ assert.match(sessionText, /qq-fish 55556666/, 'an untitled session falls back to
 const sessionRows = sessionCard.children.slice(1).map((row) => textOf(row))
 assert.equal(sessionRows[0].includes('支付宝账单'), true, 'the heaviest session is first')
 
+// 不折叠：会话再多也全部列出来（没有「还有 N 条」）。
+const manySessions = Array.from({ length: 9 }, (_, index) => ({
+  id: `session-${String(index).padStart(8, '0')}`,
+  title: `会话 ${index + 1}`,
+  preset: 'cordis',
+  tokens: 1_000_000 - index * 10_000,
+  requests: 10,
+  cost: 0.1,
+}))
+const manyTree = renderTree({
+  status: 'ready',
+  data: { ...wallet, usage: { ...MERGED, local: { ...MERGED.local, sessions: manySessions } } },
+})
+const manyCard = manyTree.children[usageIndex].children.find(
+  (node) => node?.props?.className === 'dsb-card dsb-sessions',
+)
+assert.equal(manyCard.children.slice(1).length, 9, 'every session is listed, not just the top few')
+const manyText = textOf(manyCard)
+assert.doesNotMatch(manyText, /t:sessions\.more/, 'nothing is collapsed behind a “more” line')
+assert.match(manyText, /会话 9/, 'the smallest session is still rendered')
+
+
 
 // 重叠口径：DSH 自己就用这把 Key 时，本机只是平台的一个子集，总计按平台算一次。
 const overlapText = textOf(

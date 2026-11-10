@@ -29,7 +29,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.8.10'
+export const VERSION = '1.8.11'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'
@@ -454,8 +454,8 @@ export function aggregateUsage(now = Date.now()) {
     partial: state.partial,
     ledger: ledgerWritable ? 'ok' : 'read-only',
     sources: sources.list(),
-    // 按今天的 token 从多到少；最多 30 条，避免面板 payload 无限长。
-    sessionRows: perSession.sort((a, b) => b.tokens - a.tokens).slice(0, 30),
+    // 按今天的 token 从多到少；上限 200 条（今天再忙也不至于更多，同时防止 payload 无限长）。
+    sessionRows: perSession.sort((a, b) => b.tokens - a.tokens).slice(0, 200),
   }
 }
 
