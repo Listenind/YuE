@@ -29,7 +29,7 @@ export const name = 'deepseek-balance-panel'
 export const inject = []
 
 /** 与 package.json 的 version 保持一致。 */
-export const VERSION = '1.8.11'
+export const VERSION = '1.8.12'
 
 /** 所有路由共享的前缀。 */
 export const ROUTE_PREFIX = '/dsh-deepseek-balance-panel'

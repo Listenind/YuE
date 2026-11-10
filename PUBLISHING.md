@@ -57,7 +57,7 @@ git push origin --tags
 在一个**干净的 profile** 里装一次，别用你正在开发的那个：
 
 ```powershell
-$env:DSH_HOME = "C:\Users\JIANG\AppData\Local\Temp\dsh-clean-home"
+$env:DSH_HOME = Join-Path $env:TEMP 'dsh-clean-home'
 dsh plugin --profile desktop add github:Listenind/YuE#main
 ```
 
